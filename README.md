@@ -60,6 +60,7 @@ hkbus private-eta NR330
 hkbus red-minibus --query "Kennedy Town"
 hkbus red-minibus --district "Sha Tin"
 hkbus red-route r_h08
+hkbus update --check
 ```
 
 `--json` before the subcommand prints structured output.

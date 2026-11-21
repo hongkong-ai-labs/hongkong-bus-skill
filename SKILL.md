@@ -62,6 +62,7 @@ $BIN private-eta NR330 --direction 1 --json
 $BIN red-minibus --query "Kennedy Town"
 $BIN red-minibus --district "Sha Tin"
 $BIN red-route r_h08
+$BIN update --check
 ```
 
 Operators are `kmb` (KMB and LWB), `ctb` (Citybus), `gmb` (green minibus),

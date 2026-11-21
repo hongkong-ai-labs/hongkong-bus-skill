@@ -33,6 +33,30 @@ The script checks `$HKBUS_BIN`, `hkbus` on `PATH`, then builds with
 `cargo build --release --locked`. `scripts/install.sh` installs into
 `~/.local/bin`.
 
+### Install the binary directly
+
+`npx skills add` installs the skill files. If the binary is missing, install it
+with the release installer or cargo:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hongkong-ai-labs/hongkong-bus-skill/main/scripts/install.sh | sh
+# or
+cargo install --git https://github.com/hongkong-ai-labs/hongkong-bus-skill --locked
+```
+
+Register it with any MCP client:
+
+```bash
+npx add-mcp "$(command -v hkbus) mcp" --name hongkong-bus -a claude-code -a codex -a cursor -y
+claude mcp add hongkong-bus -- hkbus mcp
+codex mcp add hongkong-bus -- hkbus mcp
+```
+
+`add-mcp` detects the client configuration files in the current project; add
+`-g` for a global install. `$(command -v hkbus)` keeps the entry correct
+when the binary is on `PATH`; substitute an absolute path if your client does
+not inherit the shell `PATH`.
+
 ## CLI
 
 ```bash

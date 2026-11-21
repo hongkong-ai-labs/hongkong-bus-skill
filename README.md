@@ -20,6 +20,7 @@ MCP server.
 
 ```bash
 npx skills add hongkong-ai-labs/hongkong-bus-skill
+npx skills update        # refresh the installed skill later
 ```
 
 **Prebuilt binary** — macOS (Intel or Apple silicon) and Linux (x86_64 or
@@ -35,6 +36,8 @@ curl -fsSL https://raw.githubusercontent.com/hongkong-ai-labs/hongkong-bus-skill
 git clone https://github.com/hongkong-ai-labs/hongkong-bus-skill
 cd hongkong-bus-skill
 cargo install --path . --locked
+# or directly from GitHub:
+cargo install --git https://github.com/hongkong-ai-labs/hongkong-bus-skill --locked
 # or: cargo build --release --locked   # target/release/hkbus
 ```
 
@@ -93,6 +96,20 @@ hkbus update --check
   }
 }
 ```
+
+Register it with any MCP client:
+
+```bash
+npx add-mcp "$(command -v hkbus) mcp" --name hongkong-bus -a claude-code -a codex -a cursor -y
+claude mcp add hongkong-bus -- hkbus mcp
+codex mcp add hongkong-bus -- hkbus mcp
+```
+
+`add-mcp` detects the client configuration files in the current project; add
+`-g` for a global install. `$(command -v hkbus)` keeps the entry correct
+when the binary is on `PATH`; substitute an absolute path if your client does
+not inherit the shell `PATH`.
+
 
 Tools: `bus_routes`, `bus_stops`, `bus_eta`, `private_bus_routes`,
 `private_bus_eta`, `red_minibus_routes`, `red_minibus_route`. See
@@ -181,6 +198,12 @@ cargo test
 cargo clippy -- -D warnings
 cargo fmt --check
 ```
+
+`rust-toolchain.toml` pins the stable toolchain with `rustfmt` and
+`clippy`, so `rustup` sets contributors up automatically. `just doc`
+builds the API documentation. See `CONTRIBUTING.md` for the full check
+list and the signed-commit requirement.
+
 
 ## Licence
 

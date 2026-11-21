@@ -130,7 +130,7 @@ pub fn private(query: Option<&str>) -> String {
         ));
     }
     out.push_str(
-        "\nDiscovery Bay: https://www.dbtransport.com.hk\nPark Island: https://www.pitcl.com.hk\n",
+        "\nDiscovery Bay: https://www.visitdiscoverybay.com/en/getting-around\nPark Island: http://www.pitcl.com.hk/en/bus_service.php\n",
     );
     out
 }

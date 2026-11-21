@@ -1,6 +1,6 @@
 //! Human-readable bus tables.
 
-use crate::api::{self, Eta, RouteInfo, Stop};
+use crate::api::{self, Eta, RedRoute, RedRouteDetail, RouteInfo, Stop};
 
 pub fn routes(operator: &str, routes: &[RouteInfo]) -> String {
     let mut out = format!("{operator} routes\n\n");
@@ -75,12 +75,47 @@ pub fn etas(route: &str, stop: &str, etas: &[Eta]) -> String {
     out
 }
 
+pub fn red_routes(routes: &[RedRoute]) -> String {
+    let mut out = format!(
+        "Red minibus routes — {} from the 16seats.net directory\n\n",
+        routes.len()
+    );
+    out.push_str(api::RED_MINIBUS);
+    out.push('\n');
+    out.push_str(&format!(
+        "{:<10} {:<28} {:<34} {}\n",
+        "Code", "District", "Route", "Service"
+    ));
+    out.push_str(&"-".repeat(120));
+    out.push('\n');
+    for route in routes {
+        out.push_str(&format!(
+            "{:<10} {:<28} {:<34} {}\n",
+            route.code,
+            truncate(&route.district, 27),
+            truncate(&route.name, 33),
+            truncate(&route.description, 48)
+        ));
+    }
+    out.push_str(
+        "\nUse `red-route <code or name>` for the published timetable, fares and stops.\n",
+    );
+    out
+}
+
+pub fn red_route(detail: &RedRouteDetail) -> String {
+    format!(
+        "{}\n{}\nSource: {}\n\n{}\n",
+        detail.name, detail.district, detail.source, detail.detail
+    )
+}
+
 pub fn private(query: Option<&str>) -> String {
     let mut out = String::from("Private bus and estate coach routes\n\n");
     out.push_str(api::private::PRIVATE_NOTE);
     out.push_str("\n\n");
     let needle = query.map(str::to_lowercase);
-    for (operator, route, origin, destination) in api::private::PRIVATE_ROUTES {
+    for (operator, route, origin, destination, fare) in api::private::PRIVATE_ROUTES {
         if let Some(needle) = &needle
             && !operator.to_lowercase().contains(needle)
             && !route.to_lowercase().contains(needle)
@@ -90,8 +125,8 @@ pub fn private(query: Option<&str>) -> String {
             continue;
         }
         out.push_str(&format!(
-            "{:<26} {:<8} {:<20} → {}\n",
-            operator, route, origin, destination
+            "{:<24} {:<8} {:<24} → {:<30} {}\n",
+            operator, route, origin, destination, fare
         ));
     }
     out.push_str(

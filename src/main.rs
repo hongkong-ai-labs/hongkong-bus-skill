@@ -67,8 +67,20 @@ enum Command {
         #[arg(long)]
         query: Option<String>,
     },
-    /// Why red minibuses have no route or ETA data.
-    RedMinibus,
+    /// Red minibus routes published by 16seats.net.
+    RedMinibus {
+        /// Route or place substring.
+        #[arg(long)]
+        query: Option<String>,
+        /// District substring, e.g. Kowloon or Sha Tin.
+        #[arg(long)]
+        district: Option<String>,
+    },
+    /// Published timetable, fares and major stops for one red minibus route.
+    RedRoute {
+        /// Route code (r_h08) or name substring.
+        route: String,
+    },
     /// Run the MCP server over stdio.
     Mcp,
 }
@@ -86,13 +98,41 @@ async fn run() -> Result<()> {
     let client = Client::new()?;
     match cli.command {
         Command::Mcp => mcp::serve(client).await?,
-        Command::RedMinibus => print!("{}", api::RED_MINIBUS),
+        Command::RedMinibus { query, district } => {
+            let routes = client.red_routes().await?;
+            let needle = query.as_deref().map(str::to_lowercase);
+            let area = district.as_deref().map(str::to_lowercase);
+            let filtered: Vec<_> = routes
+                .into_iter()
+                .filter(|route| {
+                    needle.as_ref().is_none_or(|needle| {
+                        route.name.to_lowercase().contains(needle)
+                            || route.description.to_lowercase().contains(needle)
+                    }) && area
+                        .as_ref()
+                        .is_none_or(|area| route.district.to_lowercase().contains(area))
+                })
+                .collect();
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&filtered)?);
+            } else {
+                print!("{}", render::red_routes(&filtered));
+            }
+        }
+        Command::RedRoute { route } => {
+            let detail = client.red_route(&route).await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&detail)?);
+            } else {
+                print!("{}", render::red_route(&detail));
+            }
+        }
         Command::Private { query } => {
             if cli.json {
                 let needle = query.as_deref().map(str::to_lowercase);
                 let rows: Vec<_> = api::private::PRIVATE_ROUTES
                     .iter()
-                    .filter(|(operator, route, origin, destination)| {
+                    .filter(|(operator, route, origin, destination, _)| {
                         needle.as_ref().is_none_or(|needle| {
                             operator.to_lowercase().contains(needle)
                                 || route.to_lowercase().contains(needle)
@@ -100,12 +140,13 @@ async fn run() -> Result<()> {
                                 || destination.to_lowercase().contains(needle)
                         })
                     })
-                    .map(|(operator, route, origin, destination)| {
+                    .map(|(operator, route, origin, destination, fare)| {
                         serde_json::json!({
                             "operator": operator,
                             "route": route,
                             "origin": origin,
-                            "destination": destination
+                            "destination": destination,
+                            "fare": fare
                         })
                     })
                     .collect();

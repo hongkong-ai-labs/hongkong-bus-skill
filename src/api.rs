@@ -4,7 +4,7 @@
 //! and MTR Bus. Red minibuses and private estate coaches have no fixed route
 //! or ETA feed; they are represented by reference data in [`private`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,7 @@ const CTB: &str = "https://rt.data.gov.hk/v2/transport/citybus";
 const GMB: &str = "https://data.etagmb.gov.hk";
 const NLB: &str = "https://rt.data.gov.hk/v2/transport/nlb";
 const MTR_BUS: &str = "https://rt.data.gov.hk/v1/transport/mtr/bus/getSchedule";
+const SIXTEEN_SEATS: &str = "https://www.16seats.net/eng/rmb";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
@@ -74,6 +75,26 @@ pub struct Stop {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RedRoute {
+    /// 16seats route code, e.g. `r_h08`.
+    pub code: String,
+    pub district: String,
+    pub name: String,
+    pub description: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RedRouteDetail {
+    pub code: String,
+    pub name: String,
+    pub district: String,
+    /// Cleaned official route page: timetable, fares and major stops.
+    pub detail: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Eta {
     pub operator: String,
     pub route: String,
@@ -89,6 +110,7 @@ pub struct Eta {
 pub struct Client {
     http: reqwest::Client,
     cache: Mutex<HashMap<String, (Instant, Value)>>,
+    html_cache: Mutex<HashMap<String, (Instant, String)>>,
 }
 
 impl Client {
@@ -103,6 +125,7 @@ impl Client {
                 .timeout(Duration::from_secs(30))
                 .build()?,
             cache: Mutex::new(HashMap::new()),
+            html_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -135,6 +158,99 @@ impl Client {
             .expect("bus cache poisoned")
             .insert(url.to_string(), (Instant::now(), value.clone()));
         Ok(value)
+    }
+
+    async fn get_html(&self, url: &str) -> Result<String> {
+        if let Some((at, body)) = self
+            .html_cache
+            .lock()
+            .expect("bus cache poisoned")
+            .get(url)
+            .cloned()
+            && at.elapsed() < Duration::from_secs(21_600)
+        {
+            return Ok(body);
+        }
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            bail!("{url} returned HTTP {status}");
+        }
+        self.html_cache
+            .lock()
+            .expect("bus cache poisoned")
+            .insert(url.to_string(), (Instant::now(), body.clone()));
+        Ok(body)
+    }
+
+    /// Red minibus routes from the 16seats.net public route directory.
+    pub async fn red_routes(&self) -> Result<Vec<RedRoute>> {
+        let mut routes = Vec::new();
+        for (slug, district) in RED_DISTRICTS {
+            let url = format!("{SIXTEEN_SEATS}/r_{slug}.html");
+            let html = self.get_html(&url).await?;
+            parse_red_list(&html, district, &url, &mut routes)?;
+        }
+        let mut seen = HashSet::new();
+        routes.retain(|route| seen.insert(route.code.clone()));
+        routes.sort_by(|left, right| {
+            left.district
+                .cmp(&right.district)
+                .then(left.name.cmp(&right.name))
+        });
+        Ok(routes)
+    }
+
+    /// Full published page for one red minibus route.
+    pub async fn red_route(&self, query: &str) -> Result<RedRouteDetail> {
+        let routes = self.red_routes().await?;
+        let needle = query.to_lowercase();
+        let mut matches: Vec<&RedRoute> = routes
+            .iter()
+            .filter(|route| {
+                route.code.eq_ignore_ascii_case(query)
+                    || route
+                        .code
+                        .trim_start_matches("r_")
+                        .eq_ignore_ascii_case(query)
+                    || route.name.to_lowercase().contains(&needle)
+            })
+            .collect();
+        matches.sort_by_key(|route| {
+            (
+                !route.name.to_lowercase().starts_with(&needle),
+                route.name.len(),
+            )
+        });
+        let route = match matches.len() {
+            0 => bail!("no red minibus route matches {query:?}"),
+            1 => matches[0],
+            _ => {
+                let options: Vec<String> = matches
+                    .iter()
+                    .take(10)
+                    .map(|route| format!("{} ({})", route.name, route.code))
+                    .collect();
+                bail!(
+                    "{query:?} matches several red minibus routes: {}. Use a route code.",
+                    options.join(", ")
+                );
+            }
+        };
+        let html = self.get_html(&route.url).await?;
+        Ok(RedRouteDetail {
+            code: route.code.clone(),
+            name: route.name.clone(),
+            district: route.district.clone(),
+            detail: clean_route_page(&html),
+            source: route.url.clone(),
+        })
     }
 
     async fn post(&self, url: &str, body: Value) -> Result<Value> {
@@ -903,86 +1019,315 @@ pub mod private {
         ("K76", "Tin Shui Wai Station", "Tin Heng"),
     ];
 
-    /// Private estate and cross-boundary style coach services. There is no
+    /// Private estate and residents' coach services. There is no
     /// machine-readable ETA feed for these; times are on the operator notice.
-    pub const PRIVATE_ROUTES: [(&str, &str, &str, &str); 14] = [
+    /// The fifth field is the published adult fare, or an empty string when the
+    /// operator does not publish it on an accessible page.
+    pub const PRIVATE_ROUTES: [(&str, &str, &str, &str, &str); 15] = [
         (
             "Discovery Bay (DBTSL)",
-            "DB01",
-            "Discovery Bay",
-            "North Point",
+            "DB01A",
+            "Tung Chung Station",
+            "DB North",
+            "HK$17.6 regular / HK$14.2 resident",
+        ),
+        (
+            "Discovery Bay (DBTSL)",
+            "DB01R",
+            "Tung Chung Station",
+            "DB Plaza",
+            "HK$17.6 regular / HK$14.2 resident",
         ),
         (
             "Discovery Bay (DBTSL)",
             "DB02A",
-            "Discovery Bay",
             "Hong Kong Airport",
+            "DB North",
+            "HK$59.1 regular / HK$50.0 resident",
         ),
         (
             "Discovery Bay (DBTSL)",
-            "DB03",
-            "Discovery Bay",
-            "Peninsula Village",
+            "DB02R",
+            "Hong Kong Airport",
+            "DB Plaza",
+            "HK$59.1 regular / HK$50.0 resident",
         ),
         (
             "Discovery Bay (DBTSL)",
             "DB03P",
-            "Discovery Bay",
-            "Parkridge Village",
-        ),
-        (
-            "Discovery Bay (DBTSL)",
-            "DB05",
-            "Discovery Bay",
             "Sunny Bay Station",
+            "DB North",
+            "HK$17.6 regular / HK$14.2 resident",
         ),
         (
             "Discovery Bay (DBTSL)",
-            "DB07A",
-            "Discovery Bay",
-            "Tung Chung",
+            "DB03R",
+            "Sunny Bay Station",
+            "DB Plaza",
+            "HK$17.6 regular / HK$14.2 resident",
         ),
         (
             "Discovery Bay (DBTSL)",
-            "DB07P",
+            "DB08R",
+            "Central",
             "Discovery Bay",
-            "Tung Chung",
+            "HK$71.4 regular / HK$51.3 resident (overnight)",
         ),
-        ("Discovery Bay (DBTSL)", "DB08", "Discovery Bay", "Central"),
         (
             "Park Island (PITCL)",
             "NR330",
             "Park Island",
             "Tsing Yi Station",
+            "",
         ),
-        ("Park Island (PITCL)", "NR332", "Park Island", "Kwai Fong"),
+        (
+            "Park Island (PITCL)",
+            "NR332",
+            "Park Island",
+            "Kwai Fong",
+            "",
+        ),
         (
             "Park Island (PITCL)",
             "NR334",
             "Park Island",
-            "Hong Kong Airport",
+            "Airport Terminal 2 / HZMB",
+            "",
         ),
-        ("Park Island (PITCL)", "NR338", "Park Island", "Central"),
-        ("Park Island (PITCL)", "NR331", "Park Island", "Tsuen Wan"),
         (
             "Park Island (PITCL)",
-            "NR331S",
+            "NR338",
             "Park Island",
-            "Tsuen Wan West",
+            "Central Pier 2",
+            "Overnight service",
+        ),
+        (
+            "Park Island (PITCL)",
+            "NR338S",
+            "Ma Wan",
+            "Central via Hong Kong Station",
+            "",
+        ),
+        ("Sun Bus", "NR331", "Ma Wan", "Tsuen Wan Station", ""),
+        ("Sun Bus", "NR331S", "Ma Wan", "Tsuen Wan West", ""),
+        (
+            "Sun Bus",
+            "NR330A",
+            "Park Island",
+            "Tsing Yi Station (peak)",
+            "",
         ),
     ];
 
-    pub const PRIVATE_NOTE: &str = "Discovery Bay and Park Island services publish timetables and notices on their own websites. They are listed here for route discovery only; this skill has no live ETA for them and does not invent departure times.";
+    pub const PRIVATE_NOTE: &str = "Discovery Bay and Park Island publish timetables and notices on their own websites. Routes and fares here are reference data; there is no live ETA feed for these services and this skill does not invent departure times. Check the operator timetable before travel.";
 }
 
-/// Red minibus guidance. There is no fixed route, stop or ETA dataset.
+/// Red minibus guidance. Routes and fares are published by 16seats.net, but
+/// service is not scheduled and there is no live ETA feed.
 pub const RED_MINIBUS: &str = "\
-Red minibuses have no fixed route number, stop list or ETA feed. They are \
-16- or 19-seat vehicles that pick up and set down along a general corridor, \
-with the fare displayed inside the vehicle. Board at a red minibus stand or \
-hail one where it is safe and legal; tell the driver your stop when you board. \
-The Transport Department publishes the stand locations and operating rules, \
-not live arrivals: https://www.td.gov.hk/en/transport_in_hong_kong/public_transport/minibuses/index.html\n";
+Red minibuses have no fixed timetable or live ETA feed. They are 16- or \
+19-seat vehicles that pick up and set down along a general corridor, with the \
+fare displayed on the windscreen. Route names, published fares and major \
+boarding points come from the 16seats.net route directory; exact hours, \
+routeing and fares remain at the driver's discretion. Board at a red minibus \
+stand or hail one where it is safe and legal, and tell the driver your stop. \
+Use `red-route <code or name>` for the published route page.\n";
+
+const RED_DISTRICTS: [(&str, &str); 12] = [
+    ("eas", "Eastern District"),
+    ("wcc", "Wan Chai, Central & Western"),
+    ("sou", "Southern District"),
+    ("kwt", "Kwun Tong District"),
+    ("kcw", "Kowloon City, Wong Tai Sin"),
+    ("ytm", "Yau Tsim Mong District"),
+    ("ssp", "Sham Shui Po District"),
+    ("tkt", "Tsuen Wan, Kwai Tsing"),
+    ("tmy", "Tuen Mun, Yuen Long"),
+    ("sha", "Sha Tin District"),
+    ("tpn", "Tai Po, North District"),
+    ("sak", "Sai Kung District"),
+];
+
+fn parse_red_list(
+    html: &str,
+    district: &str,
+    page_url: &str,
+    out: &mut Vec<RedRoute>,
+) -> Result<()> {
+    let base = page_url
+        .rsplit_once('/')
+        .map(|(base, _)| base)
+        .unwrap_or(page_url);
+    let mut rest = html;
+    while let Some(span) = rest.find("svcname-rmb-list\">") {
+        let name_start = span + "svcname-rmb-list\">".len();
+        let Some(name_end) = rest[name_start..]
+            .find("</span>")
+            .map(|end| name_start + end)
+        else {
+            break;
+        };
+        let name = clean_text(&rest[name_start..name_end]);
+        let Some(anchor) = rest[..span].rfind("<a href=\"r_") else {
+            break;
+        };
+        let href_start = anchor + "<a href=\"".len();
+        let Some(href_end) = rest[href_start..].find('"').map(|end| href_start + end) else {
+            break;
+        };
+        let code = rest[href_start..href_end]
+            .trim_end_matches(".html")
+            .to_string();
+        let after = &rest[name_end..];
+        let description = after
+            .find("<p>")
+            .and_then(|start| {
+                let start = start + 3;
+                after[start..]
+                    .find("</p>")
+                    .map(|end| clean_text(&after[start..start + end]))
+            })
+            .unwrap_or_default();
+        if !name.is_empty() {
+            out.push(RedRoute {
+                code: code.clone(),
+                district: district.to_string(),
+                name,
+                description,
+                url: format!("{base}/{code}.html"),
+            });
+        }
+        rest = &rest[name_end..];
+    }
+    Ok(())
+}
+
+fn clean_route_page(html: &str) -> String {
+    let mut body = html.to_string();
+    for tag in ["script", "style", "noscript"] {
+        loop {
+            let open = format!("<{tag}");
+            let Some(start) = body.find(&open) else { break };
+            let Some(close) = body[start..]
+                .find(&format!("</{tag}>"))
+                .map(|end| start + end + tag.len() + 3)
+            else {
+                break;
+            };
+            body.replace_range(start..close, " ");
+        }
+    }
+    // Keep paragraph boundaries before stripping the remaining tags.
+    for (tag, replacement) in [
+        ("<br>", "\n"),
+        ("<br/>", "\n"),
+        ("<br />", "\n"),
+        ("</p>", "\n"),
+        ("</div>", "\n"),
+        ("</li>", "\n"),
+        ("</h1>", "\n"),
+        ("</h2>", "\n"),
+        ("</h3>", "\n"),
+        ("</tr>", "\n"),
+        ("</td>", " "),
+    ] {
+        body = body.replace(tag, replacement);
+    }
+    let mut text = String::with_capacity(body.len());
+    let mut in_tag = false;
+    for character in body.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                text.push(' ');
+            }
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+    let text = decode_entities(&text);
+    let start = text
+        .rfind("Red Minibus Route")
+        .map(|index| index + "Red Minibus Route".len())
+        .unwrap_or(0);
+    let end = text.find("CONTACT US").unwrap_or(text.len());
+    let mut lines: Vec<String> = text[start..end]
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("Advertisement // scroll to continue")
+                && line != "&nbsp;"
+        })
+        .collect();
+    // Drop the repeated page heading, keeping the route name and substance.
+    if lines.first().is_some_and(|line| line.is_empty()) {
+        lines.remove(0);
+    }
+    lines.join("\n")
+}
+
+fn clean_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for character in html.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+    decode_entities(&text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn decode_entities(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(index) = rest.find('&') {
+        out.push_str(&rest[..index]);
+        let tail = &rest[index..];
+        let Some(end) = tail.find(';').filter(|end| *end <= 10) else {
+            out.push('&');
+            rest = &tail[1..];
+            continue;
+        };
+        let entity = &tail[1..end];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            "nbsp" => Some(' '),
+            "harr" => Some('\u{2194}'),
+            "rarr" => Some('\u{2192}'),
+            "larr" => Some('\u{2190}'),
+            "#9672" => Some('\u{25c8}'),
+            other => other
+                .strip_prefix('#')
+                .and_then(|value| {
+                    if let Some(hex) = value.strip_prefix(['x', 'X']) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        value.parse::<u32>().ok()
+                    }
+                })
+                .and_then(char::from_u32),
+        };
+        match decoded {
+            Some(character) => out.push(character),
+            None => out.push_str(&tail[..=end]),
+        }
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
 
 #[cfg(test)]
 mod tests {
@@ -1001,6 +1346,38 @@ mod tests {
         assert_eq!(ctb_direction("I"), "inbound");
         assert!(gmb_direction(1, "outbound"));
         assert!(gmb_direction(2, "2"));
+    }
+
+    #[test]
+    fn parses_red_minibus_directory_and_entities() {
+        let html = r#"<a href="r_h08.html"><div><p><span class="svcname-rmb-list">Kennedy Town - Shau Kei Wan</span></p><p>Shau Kei Wan &harr; Kennedy Town <span>Overnight</span></p></div></a>"#;
+        let mut routes = Vec::new();
+        parse_red_list(
+            html,
+            "Eastern District",
+            "https://www.16seats.net/eng/rmb/r_eas.html",
+            &mut routes,
+        )
+        .unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].code, "r_h08");
+        assert_eq!(
+            routes[0].description,
+            "Shau Kei Wan \u{2194} Kennedy Town Overnight"
+        );
+        assert_eq!(routes[0].url, "https://www.16seats.net/eng/rmb/r_h08.html");
+        assert_eq!(decode_entities("A &amp; B &#65;"), "A & B A");
+    }
+
+    #[test]
+    fn cleans_navigation_from_a_red_route_page() {
+        let html = r#"<html><body>Directory Red Minibus Route Directory
+            Red Minibus Route Kennedy Town - Shau Kei Wan Regular Timetable Daily
+            Regular Fare Table Full fare $8.0 CONTACT US</body></html>"#;
+        let text = clean_route_page(html);
+        assert!(text.starts_with("Kennedy Town - Shau Kei Wan"));
+        assert!(text.contains("Regular Fare Table"));
+        assert!(!text.contains("Directory"));
     }
 
     #[test]

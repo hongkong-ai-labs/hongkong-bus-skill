@@ -12,7 +12,7 @@ MCP server.
 | MTR Bus | yes | ids only | yes |
 | Discovery Bay (DBTSL) | reference | no | no |
 | Park Island (PITCL) | reference | no | no |
-| Red minibus | no fixed routes | no | no |
+| Red minibus (16seats.net) | yes | major points | no |
 
 ## Install
 
@@ -35,7 +35,9 @@ hkbus eta gmb N40 "Stanley Beach"
 hkbus eta nlb 1 "Mui Wo"
 hkbus eta mtrbus K51 K51-U210
 hkbus private --query "Discovery Bay"
-hkbus red-minibus
+hkbus red-minibus --query "Kennedy Town"
+hkbus red-minibus --district "Sha Tin"
+hkbus red-route r_h08
 ```
 
 `--json` before the subcommand prints structured output.
@@ -49,10 +51,11 @@ hkbus red-minibus
 - An empty ETA list is normal at night or at a route's terminus. The CLI says
   `no ETA` when a stop exists but has no prediction.
 - MTR Bus publishes stop ids only. The feed does not include stop names.
-- Discovery Bay and Park Island coaches are reference data. They have no
-  public live ETA feed, so no times are invented here.
-- Red minibuses have no fixed route, stop list or ETA dataset. The CLI explains
-  how they work instead of pretending otherwise.
+- Discovery Bay and Park Island coaches are reference data with published
+  fares. They have no public live ETA feed, so no times are invented here.
+- Red minibuses are not scheduled, but `red-minibus` lists recognised routes
+  from the 16seats.net directory and `red-route` shows the published fares and
+  major boarding points. There is still no live ETA.
 
 ## MCP
 
@@ -68,7 +71,8 @@ hkbus red-minibus
 ```
 
 Tools: `bus_routes`, `bus_stops`, `bus_eta`, `private_bus_routes`,
-`red_minibus_info`. See [`SKILL.md`](SKILL.md) for schemas.
+`red_minibus_routes`, `red_minibus_route`. See [`SKILL.md`](SKILL.md) for
+schemas.
 
 ## Development
 

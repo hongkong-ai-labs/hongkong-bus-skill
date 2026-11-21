@@ -113,9 +113,26 @@ fn tools() -> Value {
             }
         },
         {
-            "name": "red_minibus_info",
-            "description": "Explain why red minibuses have no fixed route or ETA data and how to use them.",
-            "inputSchema": {"type": "object", "properties": {}}
+            "name": "red_minibus_routes",
+            "description": "Red minibus routes published by 16seats.net, with district, service description and published route detail. Red minibuses remain non-scheduled with no live ETA.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Route or place substring."},
+                    "district": {"type": "string", "description": "District substring, e.g. Kowloon or Sha Tin."}
+                }
+            }
+        },
+        {
+            "name": "red_minibus_route",
+            "description": "Published timetable notes, fares and major boarding points for one red minibus route from 16seats.net. Fares and routeing remain at the driver's discretion.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "route": {"type": "string", "description": "Route code such as r_h08, or a route-name substring."}
+                },
+                "required": ["route"]
+            }
         }
     ])
 }
@@ -165,6 +182,27 @@ async fn call(client: &Client, request: &Value) -> Result<String> {
             Ok(render::etas(&route, &stop, &etas))
         }
         "private_bus_routes" => Ok(render::private(arg("query").as_deref())),
+        "red_minibus_routes" => {
+            let routes = client.red_routes().await?;
+            let needle = arg("query").map(|value| value.to_lowercase());
+            let area = arg("district").map(|value| value.to_lowercase());
+            let filtered: Vec<_> = routes
+                .into_iter()
+                .filter(|route| {
+                    needle.as_ref().is_none_or(|needle| {
+                        route.name.to_lowercase().contains(needle)
+                            || route.description.to_lowercase().contains(needle)
+                    }) && area
+                        .as_ref()
+                        .is_none_or(|area| route.district.to_lowercase().contains(area))
+                })
+                .collect();
+            Ok(render::red_routes(&filtered))
+        }
+        "red_minibus_route" => {
+            let route = arg("route").ok_or_else(|| anyhow::anyhow!("route is required"))?;
+            Ok(render::red_route(&client.red_route(&route).await?))
+        }
         "red_minibus_info" => Ok(RED_MINIBUS.to_string()),
         other => anyhow::bail!("unknown tool: {other}"),
     }

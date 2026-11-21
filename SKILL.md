@@ -1,6 +1,6 @@
 ---
 name: hongkong-bus-skill
-description: Hong Kong bus routes, stop lists and live next-arrival ETAs from one Rust CLI and MCP server — KMB/LWB, Citybus, green minibus (GMB), New Lantao Bus (NLB) and MTR Bus, plus reference routes for private estate coaches such as Discovery Bay and Park Island and an explanation of red minibuses. Use for any question about Hong Kong buses, minibuses, stops or when the next bus arrives.
+description: Hong Kong bus routes, stop lists and live next-arrival ETAs from one Rust CLI and MCP server — KMB/LWB, Citybus, green minibus (GMB), New Lantao Bus (NLB) and MTR Bus, plus published routes and fares for private estate coaches such as Discovery Bay and Park Island, and 16seats.net's red minibus route directory. Use for any question about Hong Kong buses, minibuses, stops or when the next bus arrives.
 license: MIT
 ---
 
@@ -16,7 +16,7 @@ Use it when the user asks about:
 - which stops a route serves and in what order
 - which route goes from A to B in Hong Kong
 - a Discovery Bay or Park Island coach
-- why a red minibus has no timetable or ETA
+- which red minibus goes from Kennedy Town to Shau Kei Wan, or what it costs
 
 ## Before first use
 
@@ -57,7 +57,9 @@ $BIN eta mtrbus K51 K51-U210
 
 $BIN private
 $BIN private --query "Discovery Bay"
-$BIN red-minibus
+$BIN red-minibus --query "Kennedy Town"
+$BIN red-minibus --district "Sha Tin"
+$BIN red-route r_h08
 ```
 
 Operators are `kmb` (KMB and LWB), `ctb` (Citybus), `gmb` (green minibus),
@@ -92,22 +94,30 @@ the id in both columns, and `eta mtrbus` matches on the id.
 
 ### Private coaches and red minibuses
 
-`private` lists the routes of the two largest private estate operators:
+`private` lists the external routes and published adult fares of the largest
+private estate operators:
 
-- **Discovery Bay (DBTSL)** — DB01 to North Point, DB02A to the airport, DB03 /
-  DB03P to Peninsula and Parkridge, DB05 to Sunny Bay, DB07A / DB07P to Tung
-  Chung, DB08 to Central.
-- **Park Island (PITCL)** — NR330 to Tsing Yi, NR331 / NR331S to Tsuen Wan,
-  NR332 to Kwai Fong, NR334 to the airport, NR338 to Central.
+- **Discovery Bay (DBTSL)** — DB01A / DB01R Tung Chung, DB02A / DB02R airport,
+  DB03P / DB03R Sunny Bay, and DB08R Central overnight. Resident and regular
+  fares are shown where DBTSL publishes them.
+- **Park Island (PITCL)** — NR330 Tsing Yi, NR332 Kwai Fong, NR334 airport,
+  NR338 Central overnight and NR338S Central via Hong Kong Station. NR331 /
+  NR331S are Sun Bus routes to Tsuen Wan; NR330A is the peak-hour Tsing Yi
+  supplement.
 
 These operators publish their own timetables and notices. There is no public
 live ETA feed for them, and this skill deliberately does not invent departure
-times. Give the user the official website for times.
+times. Give the user the operator timetable for exact times.
 
-Red minibuses have no fixed route number, stop list or ETA feed. They follow a
-general corridor, the fare is displayed in the vehicle, and passengers tell the
-driver where to stop. `red-minibus` prints that explanation. Do not fabricate a
-route or timetable for one.
+Red minibuses are not scheduled, but they do have recognised route corridors.
+`red-minibus` lists routes scraped from the 16seats.net public directory, with
+district, service description and route code. Filters are `--query` (route or
+place) and `--district`. `red-route <code or name>` returns the published page:
+service period, fare table and major boarding/alighting points.
+
+Fares and routeing remain at the driver's discretion, and there is no live ETA.
+Quote the published fare as a range and tell the passenger to check the
+windscreen. Never invent a red minibus departure time.
 
 ## MCP
 
@@ -134,7 +144,8 @@ Tools:
 | `bus_stops` | `{ "operator": string, "route": string, "direction"?: string }` |
 | `bus_eta` | `{ "operator": string, "route": string, "stop": string, "direction"?: string }` |
 | `private_bus_routes` | `{ "query"?: string }` |
-| `red_minibus_info` | `{}` |
+| `red_minibus_routes` | `{ "query"?: string, "district"?: string }` |
+| `red_minibus_route` | `{ "route": string }` |
 
 The server speaks JSON-RPC 2.0 over stdio, one message per line, and implements
 `initialize`, `ping`, `tools/list` and `tools/call`.
@@ -147,8 +158,9 @@ The server speaks JSON-RPC 2.0 over stdio, one message per line, and implements
   when reporting a result.
 - KMB and Citybus stops are often paired by direction; check the direction and
   the destination before telling someone a bus is coming.
-- Fares are not exposed consistently across the feeds. NLB publishes a fare
-  per stop; the others do not, so do not state a fare from this skill.
+- Fares are not exposed consistently across the live feeds. NLB publishes a
+  fare per stop; the others do not. Private-coach and red-minibus fares come
+  from published reference pages and can change at the operator's discretion.
 - This is not an official KMB, Citybus, GMB, NLB, MTR or Transport Department
   channel.
 
@@ -157,11 +169,12 @@ The server speaks JSON-RPC 2.0 over stdio, one message per line, and implements
 - KMB/LWB: `https://data.etabus.gov.hk/v1/transport/kmb/`
 - Citybus: `https://rt.data.gov.hk/v2/transport/citybus/`
 - Green minibus: `https://data.etagmb.gov.hk/`
+- Red minibus directory: `https://www.16seats.net/eng/`
+- Discovery Bay: `https://www.visitdiscoverybay.com/en/getting-around`
+- Park Island: `http://www.pitcl.com.hk/en/bus_service.php`
 - NLB: `https://rt.data.gov.hk/v2/transport/nlb/`
 - MTR Bus: `POST https://rt.data.gov.hk/v1/transport/mtr/bus/getSchedule`
-- Discovery Bay: `https://www.dbtransport.com.hk`
-- Park Island: `https://www.pitcl.com.hk`
-- Red minibus rules: `https://www.td.gov.hk/en/transport_in_hong_kong/public_transport/minibuses/index.html`
+- Red minibus operating rules: `https://www.td.gov.hk/en/transport_in_hong_kong/public_transport/minibuses/index.html`
 
 Responses are cached in-process for 30 seconds (ETA), one hour (route and stop
-lists) or one day (stop names).
+lists), six hours (red minibus pages) or one day (stop names).

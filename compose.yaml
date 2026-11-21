@@ -1,0 +1,13 @@
+services:
+  stdio:
+    build: .
+    image: hkbus:local
+    stdin_open: true
+    entrypoint: ["hkbus"]
+    command: ["mcp"]
+
+  cli:
+    profiles: ["cli"]
+    build: .
+    image: hkbus:local
+    command: ["--help"]

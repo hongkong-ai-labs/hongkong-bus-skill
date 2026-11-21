@@ -1,27 +1,36 @@
 #!/usr/bin/env bash
-# Print the absolute path of a working hkbus binary.
+# Print the absolute path of a working hkbus binary, or exit 1.
 set -euo pipefail
 
-if [ -n "${HKBUS_BIN:-}" ] && [ -x "$HKBUS_BIN" ]; then
-  printf '%s\n' "$HKBUS_BIN"
+if [[ -n "${HKBUS_BIN:-}" && -x "${HKBUS_BIN}" ]]; then
+  printf '%s\n' "$(cd "$(dirname "${HKBUS_BIN}")" && pwd)/$(basename "${HKBUS_BIN}")"
   exit 0
 fi
 
-if command -v hkbus >/dev/null 2>&1; then
-  command -v hkbus
+if resolved="$(command -v hkbus 2>/dev/null)" && [[ -n "$resolved" ]]; then
+  printf '%s\n' "$resolved"
   exit 0
 fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [ -f "$ROOT/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-  (cd "$ROOT" && cargo build --release --locked >/dev/null)
-  BIN="$ROOT/target/release/hkbus"
-  if [ -x "$BIN" ]; then
-    printf '%s\n' "$BIN"
-    exit 0
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(dirname "$script_dir")"
+
+if [[ -f "$script_dir/install.sh" ]] &&
+  path="$(sh "$script_dir/install.sh")" &&
+  [[ -n "$path" && -x "$path" ]]; then
+  printf '%s\n' "$path"
+  exit 0
+fi
+
+if [[ -f "$repo_root/Cargo.toml" ]] && command -v cargo >/dev/null 2>&1; then
+  if (cd "$repo_root" && cargo build --release --locked >&2); then
+    path="$repo_root/target/release/hkbus"
+    if [[ -x "$path" ]]; then
+      printf '%s\n' "$path"
+      exit 0
+    fi
   fi
 fi
 
-echo "hkbus: no binary found and no Cargo build available" >&2
-echo "Set HKBUS_BIN, put hkbus on PATH, or build with: cargo build --release --locked" >&2
+printf 'ensure-binary: no hkbus binary via HKBUS_BIN, PATH, install.sh or cargo build\n' >&2
 exit 1

@@ -92,7 +92,7 @@ pub fn red_routes(routes: &[RedRoute]) -> String {
         out.push_str(&format!(
             "{:<10} {:<28} {:<34} {}\n",
             route.code,
-            truncate(&route.district, 27),
+            truncate(&route.districts.join(" / "), 27),
             truncate(&route.name, 33),
             truncate(&route.description, 48)
         ));

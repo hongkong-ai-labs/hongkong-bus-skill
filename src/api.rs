@@ -4,7 +4,7 @@
 //! and MTR Bus. Red minibuses and private estate coaches have no fixed route
 //! or ETA feed; they are represented by reference data in [`private`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -87,7 +87,10 @@ pub struct Stop {
 pub struct RedRoute {
     /// 16seats route code, e.g. `r_h08`.
     pub code: String,
+    /// The first directory page that listed the route.
     pub district: String,
+    /// Every district page that lists the route.
+    pub districts: Vec<String>,
     pub name: String,
     pub description: String,
     pub url: String,
@@ -206,8 +209,7 @@ impl Client {
             let html = self.get_html(&url).await?;
             parse_red_list(&html, district, &url, &mut routes)?;
         }
-        let mut seen = HashSet::new();
-        routes.retain(|route| seen.insert(route.code.clone()));
+        let mut routes = dedupe_red_routes(routes);
         routes.sort_by(|left, right| {
             left.district
                 .cmp(&right.district)
@@ -256,7 +258,7 @@ impl Client {
         Ok(RedRouteDetail {
             code: route.code.clone(),
             name: route.name.clone(),
-            district: route.district.clone(),
+            district: route.districts.join(" / "),
             detail: clean_route_page(&html),
             source: route.url.clone(),
         })
@@ -1285,6 +1287,7 @@ fn parse_red_list(
             out.push(RedRoute {
                 code: code.clone(),
                 district: district.to_string(),
+                districts: vec![district.to_string()],
                 name,
                 description,
                 url: format!("{base}/{code}.html"),
@@ -1293,6 +1296,26 @@ fn parse_red_list(
         rest = &rest[name_end..];
     }
     Ok(())
+}
+
+/// Merge duplicate route codes so a route keeps every district page it appears on.
+fn dedupe_red_routes(routes: Vec<RedRoute>) -> Vec<RedRoute> {
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut unique: Vec<RedRoute> = Vec::new();
+    for route in routes {
+        if let Some(&position) = index.get(&route.code) {
+            let existing = &mut unique[position];
+            for district in route.districts {
+                if !existing.districts.contains(&district) {
+                    existing.districts.push(district);
+                }
+            }
+        } else {
+            index.insert(route.code.clone(), unique.len());
+            unique.push(route);
+        }
+    }
+    unique
 }
 
 fn clean_route_page(html: &str) -> String {
@@ -1460,6 +1483,27 @@ mod tests {
         );
         assert_eq!(routes[0].url, "https://www.16seats.net/eng/rmb/r_h08.html");
         assert_eq!(decode_entities("A &amp; B &#65;"), "A & B A");
+    }
+
+    #[test]
+    fn dedupe_keeps_every_district_for_a_route() {
+        let route = |district: &str| RedRoute {
+            code: "r_n52".into(),
+            district: district.into(),
+            districts: vec![district.into()],
+            name: "So Kwun Wat - Tai Wai".into(),
+            description: String::new(),
+            url: "https://www.16seats.net/eng/rmb/r_n52.html".into(),
+        };
+        let routes = dedupe_red_routes(vec![
+            route("Tuen Mun, Yuen Long"),
+            route("Sha Tin District"),
+        ]);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].districts,
+            vec!["Tuen Mun, Yuen Long", "Sha Tin District"]
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! and MTR Bus. Red minibuses and private estate coaches have no fixed route
 //! or ETA feed; they are represented by reference data in [`private`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -58,6 +58,16 @@ impl Operator {
             Self::MtrBus => "MTR Bus",
         }
     }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Kmb => "kmb",
+            Self::Ctb => "ctb",
+            Self::Gmb => "gmb",
+            Self::Nlb => "nlb",
+            Self::MtrBus => "mtrbus",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +91,12 @@ pub struct Stop {
     pub direction: String,
     pub service_type: String,
     pub note: String,
+    /// WGS84 latitude when the operator publishes coordinates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lat: Option<f64>,
+    /// WGS84 longitude when the operator publishes coordinates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lng: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,6 +120,40 @@ pub struct RedRouteDetail {
     /// Cleaned official route page: timetable, fares and major stops.
     pub detail: String,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NearbyStop {
+    pub operator: String,
+    pub id: String,
+    pub name: String,
+    pub distance_km: f64,
+    pub lat: f64,
+    pub lng: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JourneyLeg {
+    pub operator: String,
+    pub route: String,
+    pub direction: String,
+    pub service_type: String,
+    pub board: String,
+    pub board_id: String,
+    pub alight: String,
+    pub alight_id: String,
+    /// Stops travelled on this leg.
+    pub stops: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Journey {
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub transfers: usize,
+    pub total_stops: i64,
+    pub legs: Vec<JourneyLeg>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -538,7 +588,7 @@ impl Client {
                         .await?;
                     for row in value["data"].as_array().into_iter().flatten() {
                         let id = text(row, "stop");
-                        let name = self.kmb_stop_name(&id).await?;
+                        let (name, lat, lng) = self.kmb_stop(&id).await?;
                         out.push(Stop {
                             id,
                             name,
@@ -549,6 +599,8 @@ impl Client {
                             direction: bound.clone(),
                             service_type: service_type.clone(),
                             note: String::new(),
+                            lat,
+                            lng,
                         });
                     }
                 }
@@ -569,7 +621,7 @@ impl Client {
                         .await?;
                     for row in value["data"].as_array().into_iter().flatten() {
                         let id = text(row, "stop");
-                        let name = self.ctb_stop_name(&id).await?;
+                        let (name, lat, lng) = self.ctb_stop(&id).await?;
                         out.push(Stop {
                             id,
                             name,
@@ -577,6 +629,8 @@ impl Client {
                             direction: direction.clone(),
                             service_type: String::new(),
                             note: String::new(),
+                            lat,
+                            lng,
                         });
                     }
                 }
@@ -614,6 +668,8 @@ impl Client {
                             direction: sequence.to_string(),
                             service_type: String::new(),
                             note: label.clone(),
+                            lat: None,
+                            lng: None,
                         });
                     }
                 }
@@ -639,6 +695,8 @@ impl Client {
                         direction: String::new(),
                         service_type: String::new(),
                         note: format!("fare {}", text(row, "fare")),
+                        lat: number(row, "latitude"),
+                        lng: number(row, "longitude"),
                     })
                     .collect())
             }
@@ -656,6 +714,8 @@ impl Client {
                         direction: String::new(),
                         service_type: String::new(),
                         note: "MTR Bus publishes stop ids only".into(),
+                        lat: None,
+                        lng: None,
                     })
                     .collect())
             }
@@ -912,18 +972,19 @@ impl Client {
         Ok(variants)
     }
 
-    async fn kmb_stop_name(&self, stop_id: &str) -> Result<String> {
+    async fn kmb_stop(&self, stop_id: &str) -> Result<(String, Option<f64>, Option<f64>)> {
         let value = self
             .get(
                 &format!("{KMB}/stop/{stop_id}"),
                 Duration::from_secs(86_400),
             )
             .await?;
-        let name = text(&value["data"], "name_en");
+        let data = &value["data"];
+        let name = text(data, "name_en");
         if name.is_empty() {
             bail!("KMB stop {stop_id} not found");
         }
-        Ok(name)
+        Ok((name, number(data, "lat"), number(data, "long")))
     }
 
     async fn kmb_find_stop(
@@ -944,7 +1005,7 @@ impl Client {
             .await?;
         for row in value["data"].as_array().into_iter().flatten() {
             let id = text(row, "stop");
-            let name = self.kmb_stop_name(&id).await?;
+            let (name, _, _) = self.kmb_stop(&id).await?;
             if id == query || name.to_lowercase().contains(&query.to_lowercase()) {
                 return Ok(Some((id, name)));
             }
@@ -952,14 +1013,19 @@ impl Client {
         Ok(None)
     }
 
-    async fn ctb_stop_name(&self, stop_id: &str) -> Result<String> {
+    async fn ctb_stop(&self, stop_id: &str) -> Result<(String, Option<f64>, Option<f64>)> {
         let value = self
             .get(
                 &format!("{CTB}/stop/{stop_id}"),
                 Duration::from_secs(86_400),
             )
             .await?;
-        Ok(text(&value["data"], "name_en"))
+        let data = &value["data"];
+        Ok((
+            text(data, "name_en"),
+            number(data, "lat"),
+            number(data, "long"),
+        ))
     }
 
     async fn ctb_find_stop(
@@ -976,7 +1042,7 @@ impl Client {
             .await?;
         for row in value["data"].as_array().into_iter().flatten() {
             let id = text(row, "stop");
-            let name = self.ctb_stop_name(&id).await?;
+            let (name, _, _) = self.ctb_stop(&id).await?;
             if id == query || name.to_lowercase().contains(&query.to_lowercase()) {
                 return Ok(Some((id, name)));
             }
@@ -1042,6 +1108,14 @@ fn text(value: &Value, key: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+fn number(value: &Value, key: &str) -> Option<f64> {
+    value.get(key).and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+    })
 }
 
 fn kmb_word(bound: impl AsRef<str>) -> &'static str {

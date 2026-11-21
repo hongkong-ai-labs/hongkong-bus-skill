@@ -81,6 +81,14 @@ enum Command {
         /// Route code (r_h08) or name substring.
         route: String,
     },
+    /// Live Park Island (PITCL) arrivals for NR330/332/334/338.
+    PrivateEta {
+        /// PITCL route, e.g. NR330.
+        route: String,
+        /// Direction 1 or 2; omit for both.
+        #[arg(long)]
+        direction: Option<u8>,
+    },
     /// Run the MCP server over stdio.
     Mcp,
 }
@@ -117,6 +125,15 @@ async fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&filtered)?);
             } else {
                 print!("{}", render::red_routes(&filtered));
+            }
+        }
+        Command::PrivateEta { route, direction } => {
+            let mut etas = client.pitcl_eta(&route, direction).await?;
+            etas.sort_by_key(|eta| (eta.minutes.unwrap_or(i64::MAX), eta.eta.clone()));
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&etas)?);
+            } else {
+                print!("{}", render::etas(&route, "Park Island stops", &etas));
             }
         }
         Command::RedRoute { route } => {

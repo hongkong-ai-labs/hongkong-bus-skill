@@ -18,6 +18,15 @@ const GMB: &str = "https://data.etagmb.gov.hk";
 const NLB: &str = "https://rt.data.gov.hk/v2/transport/nlb";
 const MTR_BUS: &str = "https://rt.data.gov.hk/v1/transport/mtr/bus/getSchedule";
 const SIXTEEN_SEATS: &str = "https://www.16seats.net/eng/rmb";
+const PITCL_API: &str = "https://360-api.socif.co";
+
+/// Park Island routes with live ETA on the Socif backend.
+pub const PITCL_LIVE: [(&str, u64); 4] = [
+    ("NR330", 249),
+    ("NR332", 250),
+    ("NR334", 252),
+    ("NR338", 253),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
@@ -251,6 +260,90 @@ impl Client {
             detail: clean_route_page(&html),
             source: route.url.clone(),
         })
+    }
+
+    /// Live Park Island (PITCL) arrivals for NR330/332/334/338.
+    pub async fn pitcl_eta(&self, route: &str, direction: Option<u8>) -> Result<Vec<Eta>> {
+        let (code, id) = PITCL_LIVE
+            .iter()
+            .find(|(code, _)| code.eq_ignore_ascii_case(route))
+            .map(|(code, id)| (*code, *id))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no live Park Island ETA for {route}; use NR330, NR332, NR334 or NR338"
+                )
+            })?;
+        let meta = self
+            .get(
+                &format!("{PITCL_API}/api/route/{id}"),
+                Duration::from_secs(3600),
+            )
+            .await?;
+        let mut labels = HashMap::new();
+        for row in meta["data"].as_array().into_iter().flatten() {
+            for direction in row["directions"].as_array().into_iter().flatten() {
+                if let (Some(seq), Some(orig), Some(dest)) = (
+                    direction["route_seq"].as_u64(),
+                    direction["orig_en"].as_str(),
+                    direction["dest_en"].as_str(),
+                ) {
+                    labels.insert(seq as u8, format!("{orig} → {dest}"));
+                }
+            }
+        }
+        let sequences: Vec<u8> = match direction {
+            Some(seq @ (1 | 2)) => vec![seq],
+            Some(other) => bail!("direction must be 1 or 2, got {other}"),
+            None => vec![1, 2],
+        };
+        let mut out = Vec::new();
+        for seq in sequences {
+            let stops = self
+                .get(
+                    &format!("{PITCL_API}/api/route-stop/{id}/{seq}"),
+                    Duration::from_secs(3600),
+                )
+                .await?;
+            let names: HashMap<i64, String> = stops["data"]["route_stops"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|row| {
+                    Some((
+                        row["stop_seq"].as_i64()?,
+                        row["name_en"].as_str()?.to_string(),
+                    ))
+                })
+                .collect();
+            let etas = self
+                .get(
+                    &format!("{PITCL_API}/api/eta/route-stop/{id}/{seq}"),
+                    Duration::from_secs(30),
+                )
+                .await?;
+            for stop in etas["data"]["eta"].as_array().into_iter().flatten() {
+                let Some(stop_seq) = stop["stopSeq"].as_i64() else {
+                    continue;
+                };
+                let Some(stop_name) = names.get(&stop_seq) else {
+                    continue;
+                };
+                for eta in stop["eta"].as_array().into_iter().flatten() {
+                    out.push(Eta {
+                        operator: "pitcl".into(),
+                        route: code.into(),
+                        direction: seq.to_string(),
+                        destination: labels.get(&seq).cloned().unwrap_or_default(),
+                        stop: stop_name.clone(),
+                        eta: text(eta, "timestamp"),
+                        minutes: eta["diff"].as_i64(),
+                        remark: text(eta, "remarks_en"),
+                        data_time: text(&etas, "generated_timestamp"),
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn post(&self, url: &str, body: Value) -> Result<Value> {

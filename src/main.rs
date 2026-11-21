@@ -9,6 +9,8 @@ use clap::{Parser, Subcommand};
 
 use api::{Client, Operator};
 
+mod update;
+
 #[derive(Parser)]
 #[command(
     name = "hkbus",
@@ -61,6 +63,35 @@ enum Command {
         #[arg(long)]
         direction: Option<String>,
     },
+    /// Stops near a coordinate.
+    Near {
+        /// Latitude, e.g. 22.3193.
+        lat: f64,
+        /// Longitude, e.g. 114.1694.
+        lng: f64,
+        /// kmb, ctb, gmb, nlb or mtrbus. Default kmb.
+        #[arg(long, default_value = "kmb")]
+        operator: String,
+        /// Restrict to one route (required for ctb, gmb and nlb).
+        #[arg(long)]
+        route: Option<String>,
+        /// Search radius in kilometres.
+        #[arg(long, default_value_t = 0.5)]
+        radius: f64,
+        /// Maximum stops to print.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Plan a direct or one-transfer bus journey.
+    Journey {
+        /// Origin stop or place name, e.g. "Chuk Yuen" or a stop id.
+        from: String,
+        /// Destination stop or place name, e.g. "Central".
+        to: String,
+        /// Maximum journeys to print.
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
     /// Private estate coaches with no live feed (Discovery Bay, Park Island).
     Private {
         /// Operator, route or place substring.
@@ -89,6 +120,15 @@ enum Command {
         #[arg(long)]
         direction: Option<u8>,
     },
+    /// Update this binary using the method it was installed with
+    Update {
+        /// Only report the current version, latest release and install method
+        #[arg(long)]
+        check: bool,
+        /// Reinstall even when the current version is up to date
+        #[arg(long)]
+        force: bool,
+    },
     /// Run the MCP server over stdio.
     Mcp,
 }
@@ -105,6 +145,9 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     let client = Client::new()?;
     match cli.command {
+        Command::Update { check, force } => {
+            update::run(check, force)?;
+        }
         Command::Mcp => mcp::serve(client).await?,
         Command::RedMinibus { query, district } => {
             let routes = client.red_routes().await?;
@@ -205,6 +248,46 @@ async fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&stops)?);
             } else {
                 print!("{}", render::stops(&route, &stops));
+            }
+        }
+        Command::Near {
+            lat,
+            lng,
+            operator,
+            route,
+            radius,
+            limit,
+        } => {
+            let operator = Operator::parse(&operator)?;
+            if limit == 0 {
+                bail!("--limit must be at least 1");
+            }
+            let stops = client
+                .stops_near(operator, lat, lng, radius, limit, route.as_deref())
+                .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&stops)?);
+            } else {
+                print!("{}", render::nearby(lat, lng, &stops));
+            }
+        }
+        Command::Journey { from, to, limit } => {
+            if limit == 0 {
+                bail!("--limit must be at least 1");
+            }
+            let journeys = client.journey(&from, &to, limit).await?;
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "from": from,
+                        "to": to,
+                        "count": journeys.len(),
+                        "journeys": journeys
+                    }))?
+                );
+            } else {
+                print!("{}", render::journeys(&from, &to, &journeys));
             }
         }
         Command::Eta {

@@ -20,6 +20,7 @@ MCP server.
 
 ```bash
 npx skills add hongkong-ai-labs/hongkong-bus-skill
+npx skills update        # refresh the installed skill later
 ```
 
 **Prebuilt binary** — macOS (Intel or Apple silicon) and Linux (x86_64 or
@@ -35,6 +36,8 @@ curl -fsSL https://raw.githubusercontent.com/hongkong-ai-labs/hongkong-bus-skill
 git clone https://github.com/hongkong-ai-labs/hongkong-bus-skill
 cd hongkong-bus-skill
 cargo install --path . --locked
+# or directly from GitHub:
+cargo install --git https://github.com/hongkong-ai-labs/hongkong-bus-skill --locked
 # or: cargo build --release --locked   # target/release/hkbus
 ```
 
@@ -55,11 +58,15 @@ hkbus eta ctb 1 "Central"
 hkbus eta gmb N40 "Stanley Beach"
 hkbus eta nlb 1 "Mui Wo"
 hkbus eta mtrbus K51 K51-U210
+hkbus near 22.3193 114.1694 --radius 0.5 --limit 10
+hkbus near 22.2883 114.1504 --operator ctb --route 1 --radius 0.3
+hkbus journey "Chuk Yuen" "Central" --limit 3
 hkbus private --query "Discovery Bay"
 hkbus private-eta NR330
 hkbus red-minibus --query "Kennedy Town"
 hkbus red-minibus --district "Sha Tin"
 hkbus red-route r_h08
+hkbus update --check
 ```
 
 `--json` before the subcommand prints structured output.
@@ -72,6 +79,13 @@ hkbus red-route r_h08
   ambiguity.
 - An empty ETA list is normal at night or at a route's terminus. The CLI says
   `no ETA` when a stop exists but has no prediction.
+- `near` uses the KMB bulk stop list, which carries coordinates. Citybus and
+  NLB need `--route` because their coordinates only appear in route stop
+  lists. GMB and MTR Bus publish no stop coordinates.
+- `journey` returns direct routes first and a one-transfer option only when
+  there is no direct route. It covers KMB, Citybus and NLB; GMB route
+discovery is not implemented because the feed has no bulk route-stop endpoint.
+  A journey is a route option, not a live journey time.
 - MTR Bus publishes stop ids only. The feed does not include stop names.
 - Discovery Bay and Park Island routes and fares are reference data. Park
   Island NR330/332/334/338 have live ETA via `private-eta`; Discovery Bay has
@@ -93,8 +107,23 @@ hkbus red-route r_h08
 }
 ```
 
+Register it with any MCP client:
+
+```bash
+npx add-mcp "$(command -v hkbus) mcp" --name hongkong-bus -a claude-code -a codex -a cursor -y
+claude mcp add hongkong-bus -- hkbus mcp
+codex mcp add hongkong-bus -- hkbus mcp
+```
+
+`add-mcp` detects the client configuration files in the current project; add
+`-g` for a global install. `$(command -v hkbus)` keeps the entry correct
+when the binary is on `PATH`; substitute an absolute path if your client does
+not inherit the shell `PATH`.
+
+
 Tools: `bus_routes`, `bus_stops`, `bus_eta`, `private_bus_routes`,
-`private_bus_eta`, `red_minibus_routes`, `red_minibus_route`. See
+`private_bus_eta`, `red_minibus_routes`, `red_minibus_route`,
+`red_minibus_info`, `bus_stops_near`, `bus_journey`. See
 [`SKILL.md`](SKILL.md) for schemas.
 
 ## Run modes and deployment
@@ -180,6 +209,12 @@ cargo test
 cargo clippy -- -D warnings
 cargo fmt --check
 ```
+
+`rust-toolchain.toml` pins the stable toolchain with `rustfmt` and
+`clippy`, so `rustup` sets contributors up automatically. `just doc`
+builds the API documentation. See `CONTRIBUTING.md` for the full check
+list and the signed-commit requirement.
+
 
 ## Licence
 

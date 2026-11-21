@@ -4,7 +4,7 @@
 //! and MTR Bus. Red minibuses and private estate coaches have no fixed route
 //! or ETA feed; they are represented by reference data in [`private`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -58,6 +58,16 @@ impl Operator {
             Self::MtrBus => "MTR Bus",
         }
     }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Kmb => "kmb",
+            Self::Ctb => "ctb",
+            Self::Gmb => "gmb",
+            Self::Nlb => "nlb",
+            Self::MtrBus => "mtrbus",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +91,12 @@ pub struct Stop {
     pub direction: String,
     pub service_type: String,
     pub note: String,
+    /// WGS84 latitude when the operator publishes coordinates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lat: Option<f64>,
+    /// WGS84 longitude when the operator publishes coordinates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lng: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,6 +120,40 @@ pub struct RedRouteDetail {
     /// Cleaned official route page: timetable, fares and major stops.
     pub detail: String,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NearbyStop {
+    pub operator: String,
+    pub id: String,
+    pub name: String,
+    pub distance_km: f64,
+    pub lat: f64,
+    pub lng: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JourneyLeg {
+    pub operator: String,
+    pub route: String,
+    pub direction: String,
+    pub service_type: String,
+    pub board: String,
+    pub board_id: String,
+    pub alight: String,
+    pub alight_id: String,
+    /// Stops travelled on this leg.
+    pub stops: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Journey {
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub transfers: usize,
+    pub total_stops: i64,
+    pub legs: Vec<JourneyLeg>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -538,7 +588,7 @@ impl Client {
                         .await?;
                     for row in value["data"].as_array().into_iter().flatten() {
                         let id = text(row, "stop");
-                        let name = self.kmb_stop_name(&id).await?;
+                        let (name, lat, lng) = self.kmb_stop(&id).await?;
                         out.push(Stop {
                             id,
                             name,
@@ -549,6 +599,8 @@ impl Client {
                             direction: bound.clone(),
                             service_type: service_type.clone(),
                             note: String::new(),
+                            lat,
+                            lng,
                         });
                     }
                 }
@@ -569,7 +621,7 @@ impl Client {
                         .await?;
                     for row in value["data"].as_array().into_iter().flatten() {
                         let id = text(row, "stop");
-                        let name = self.ctb_stop_name(&id).await?;
+                        let (name, lat, lng) = self.ctb_stop(&id).await?;
                         out.push(Stop {
                             id,
                             name,
@@ -577,6 +629,8 @@ impl Client {
                             direction: direction.clone(),
                             service_type: String::new(),
                             note: String::new(),
+                            lat,
+                            lng,
                         });
                     }
                 }
@@ -614,6 +668,8 @@ impl Client {
                             direction: sequence.to_string(),
                             service_type: String::new(),
                             note: label.clone(),
+                            lat: None,
+                            lng: None,
                         });
                     }
                 }
@@ -639,6 +695,8 @@ impl Client {
                         direction: String::new(),
                         service_type: String::new(),
                         note: format!("fare {}", text(row, "fare")),
+                        lat: number(row, "latitude"),
+                        lng: number(row, "longitude"),
                     })
                     .collect())
             }
@@ -656,10 +714,288 @@ impl Client {
                         direction: String::new(),
                         service_type: String::new(),
                         note: "MTR Bus publishes stop ids only".into(),
+                        lat: None,
+                        lng: None,
                     })
                     .collect())
             }
         }
+    }
+
+    /// Stops within `radius_km` of a coordinate.
+    ///
+    /// KMB publishes a bulk stop list, so it needs no route. Citybus and NLB
+    /// carry coordinates in their route stop lists and therefore need
+    /// `route`. GMB and MTR Bus do not publish stop coordinates.
+    pub async fn stops_near(
+        &self,
+        operator: Operator,
+        lat: f64,
+        lng: f64,
+        radius_km: f64,
+        limit: usize,
+        route: Option<&str>,
+    ) -> Result<Vec<NearbyStop>> {
+        if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lng) {
+            bail!("lat must be -90..90 and lng must be -180..180");
+        }
+        if !(radius_km.is_finite() && radius_km > 0.0) {
+            bail!("radius must be a positive number of kilometres");
+        }
+        let radius_km = radius_km.min(20.0);
+        let limit = limit.clamp(1, 100);
+
+        let stops = match route {
+            Some(route) => self.stops(operator, route, None).await?,
+            None if operator == Operator::Kmb => self.kmb_all_stops().await?,
+            None => bail!(
+                "{} does not publish a bulk stop list; pass --route to search one route",
+                operator.label()
+            ),
+        };
+
+        let mut with_coordinates = 0usize;
+        let mut out: Vec<NearbyStop> = stops
+            .into_iter()
+            .filter_map(|stop| {
+                let (stop_lat, stop_lng) = (stop.lat?, stop.lng?);
+                with_coordinates += 1;
+                let distance = haversine_km(lat, lng, stop_lat, stop_lng);
+                (distance <= radius_km).then(|| NearbyStop {
+                    operator: operator.id().to_string(),
+                    id: stop.id,
+                    name: stop.name,
+                    distance_km: (distance * 100.0).round() / 100.0,
+                    lat: stop_lat,
+                    lng: stop_lng,
+                })
+            })
+            .collect();
+
+        if with_coordinates == 0 {
+            bail!(
+                "{} stop data for this route has no coordinates; nearby search works for KMB (all stops), Citybus and NLB (with --route)",
+                operator.label()
+            );
+        }
+        out.sort_by(|left, right| {
+            left.distance_km
+                .partial_cmp(&right.distance_km)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.dedup_by(|left, right| left.id == right.id);
+        out.truncate(limit);
+        if out.is_empty() {
+            bail!("no stops within {radius_km} km; widen the radius");
+        }
+        Ok(out)
+    }
+
+    /// Best-effort direct and one-transfer journeys across KMB, Citybus and
+    /// NLB. Green minibus route discovery is not covered yet because its feed
+    /// has no bulk route-stop endpoint.
+    pub async fn journey(&self, from: &str, to: &str, limit: usize) -> Result<Vec<Journey>> {
+        let from = from.trim();
+        let to = to.trim();
+        if from.is_empty() || to.is_empty() {
+            bail!("from and to must not be empty");
+        }
+        if from.eq_ignore_ascii_case(to) {
+            bail!("from and to are the same place");
+        }
+        let limit = limit.clamp(1, 20);
+
+        let index = self.kmb_index().await?;
+        let from_stops = matching_stops(&index, from);
+        let to_stops = matching_stops(&index, to);
+
+        let mut out = Vec::new();
+        if !from_stops.is_empty() && !to_stops.is_empty() {
+            out = direct_journeys(&index, &from_stops, &to_stops, from, to);
+            if out.is_empty() {
+                out = transfer_journeys(&index, &from_stops, &to_stops, from, to, limit);
+            }
+        }
+        // Citybus stop details are a per-stop request, so only ask the other
+        // operators when KMB found nothing. This keeps the common case fast.
+        if out.is_empty() {
+            out.extend(self.candidate_direct(from, to).await?);
+        }
+
+        out.sort_by(|left, right| {
+            left.transfers
+                .cmp(&right.transfers)
+                .then(left.total_stops.cmp(&right.total_stops))
+        });
+        out.dedup_by(|left, right| {
+            left.legs.len() == right.legs.len()
+                && left.legs.iter().zip(&right.legs).all(|(a, b)| {
+                    a.route == b.route && a.board_id == b.board_id && a.alight_id == b.alight_id
+                })
+        });
+        out.truncate(limit);
+        if out.is_empty() {
+            bail!(
+                "no direct KMB, Citybus or NLB route connects {from:?} and {to:?}; try a nearby stop name or a route number"
+            );
+        }
+        Ok(out)
+    }
+
+    async fn kmb_all_stops(&self) -> Result<Vec<Stop>> {
+        let value = self
+            .get(&format!("{KMB}/stop/"), Duration::from_secs(86_400))
+            .await?;
+        Ok(value["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                let id = text(row, "stop");
+                let name = text(row, "name_en");
+                let lat = number(row, "lat")?;
+                let lng = number(row, "long")?;
+                if id.is_empty() || name.is_empty() {
+                    return None;
+                }
+                Some(Stop {
+                    id,
+                    name,
+                    sequence: 0,
+                    direction: String::new(),
+                    service_type: String::new(),
+                    note: String::new(),
+                    lat: Some(lat),
+                    lng: Some(lng),
+                })
+            })
+            .collect())
+    }
+
+    async fn kmb_index(&self) -> Result<KmbIndex> {
+        let stops_value = self
+            .get(&format!("{KMB}/stop/"), Duration::from_secs(86_400))
+            .await?;
+        let mut stops = HashMap::new();
+        for row in stops_value["data"].as_array().into_iter().flatten() {
+            let id = text(row, "stop");
+            let name = text(row, "name_en");
+            let (Some(lat), Some(lng)) = (number(row, "lat"), number(row, "long")) else {
+                continue;
+            };
+            if !id.is_empty() && !name.is_empty() {
+                stops.insert(id, (name, lat, lng));
+            }
+        }
+
+        let routes_value = self
+            .get(&format!("{KMB}/route-stop/"), Duration::from_secs(3600))
+            .await?;
+        let mut routes: HashMap<(String, String, String), Vec<(i64, String)>> = HashMap::new();
+        let mut by_stop: HashMap<String, Vec<(String, String, String, i64)>> = HashMap::new();
+        for row in routes_value["data"].as_array().into_iter().flatten() {
+            let route = text(row, "route");
+            let bound = text(row, "bound");
+            let service_type = text(row, "service_type");
+            let stop = text(row, "stop");
+            let sequence = row["seq"]
+                .as_i64()
+                .or_else(|| text(row, "seq").parse().ok())
+                .unwrap_or_default();
+            if route.is_empty() || stop.is_empty() || sequence == 0 {
+                continue;
+            }
+            routes
+                .entry((route.clone(), bound.clone(), service_type.clone()))
+                .or_default()
+                .push((sequence, stop.clone()));
+            by_stop
+                .entry(stop)
+                .or_default()
+                .push((route, bound, service_type, sequence));
+        }
+        for stops_on_route in routes.values_mut() {
+            stops_on_route.sort_by_key(|(sequence, _)| *sequence);
+        }
+        Ok(KmbIndex {
+            stops,
+            routes,
+            by_stop,
+        })
+    }
+
+    async fn candidate_direct(&self, from: &str, to: &str) -> Result<Vec<Journey>> {
+        let mut candidates: Vec<(Operator, RouteInfo)> = Vec::new();
+        for operator in [Operator::Ctb, Operator::Nlb] {
+            for query in [from, to] {
+                if let Ok(routes) = self.routes(operator, Some(query), None, 30).await {
+                    candidates.extend(routes.into_iter().map(|info| (operator, info)));
+                }
+            }
+        }
+        candidates.sort_by(|(left_operator, left), (right_operator, right)| {
+            left_operator
+                .id()
+                .cmp(right_operator.id())
+                .then(left.route.cmp(&right.route))
+                .then(left.direction.cmp(&right.direction))
+        });
+        candidates.dedup_by(|(left_operator, left), (right_operator, right)| {
+            left_operator.id() == right_operator.id()
+                && left.route == right.route
+                && left.direction == right.direction
+                && left.service_type == right.service_type
+        });
+        candidates.truncate(8);
+
+        let mut out = Vec::new();
+        for (operator, info) in candidates {
+            let stops = match self.stops(operator, &info.route, None).await {
+                Ok(stops) => stops,
+                Err(_) => continue,
+            };
+            let mut groups: HashMap<(String, String), Vec<Stop>> = HashMap::new();
+            for stop in stops {
+                groups
+                    .entry((stop.direction.clone(), stop.service_type.clone()))
+                    .or_default()
+                    .push(stop);
+            }
+            for group in groups.values() {
+                let board = group
+                    .iter()
+                    .find(|stop| stop.id == from || stop_matches(&stop.name, from));
+                let alight = group
+                    .iter()
+                    .find(|stop| stop.id == to || stop_matches(&stop.name, to));
+                let (Some(board), Some(alight)) = (board, alight) else {
+                    continue;
+                };
+                if alight.sequence <= board.sequence {
+                    continue;
+                }
+                let total = alight.sequence - board.sequence;
+                out.push(Journey {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    kind: "direct".into(),
+                    transfers: 0,
+                    total_stops: total,
+                    legs: vec![JourneyLeg {
+                        operator: operator.id().to_string(),
+                        route: info.route.clone(),
+                        direction: direction_label(&board.direction),
+                        service_type: board.service_type.clone(),
+                        board: board.name.clone(),
+                        board_id: board.id.clone(),
+                        alight: alight.name.clone(),
+                        alight_id: alight.id.clone(),
+                        stops: total,
+                    }],
+                });
+            }
+        }
+        Ok(out)
     }
 
     pub async fn eta(
@@ -912,18 +1248,19 @@ impl Client {
         Ok(variants)
     }
 
-    async fn kmb_stop_name(&self, stop_id: &str) -> Result<String> {
+    async fn kmb_stop(&self, stop_id: &str) -> Result<(String, Option<f64>, Option<f64>)> {
         let value = self
             .get(
                 &format!("{KMB}/stop/{stop_id}"),
                 Duration::from_secs(86_400),
             )
             .await?;
-        let name = text(&value["data"], "name_en");
+        let data = &value["data"];
+        let name = text(data, "name_en");
         if name.is_empty() {
             bail!("KMB stop {stop_id} not found");
         }
-        Ok(name)
+        Ok((name, number(data, "lat"), number(data, "long")))
     }
 
     async fn kmb_find_stop(
@@ -944,7 +1281,7 @@ impl Client {
             .await?;
         for row in value["data"].as_array().into_iter().flatten() {
             let id = text(row, "stop");
-            let name = self.kmb_stop_name(&id).await?;
+            let (name, _, _) = self.kmb_stop(&id).await?;
             if id == query || name.to_lowercase().contains(&query.to_lowercase()) {
                 return Ok(Some((id, name)));
             }
@@ -952,14 +1289,19 @@ impl Client {
         Ok(None)
     }
 
-    async fn ctb_stop_name(&self, stop_id: &str) -> Result<String> {
+    async fn ctb_stop(&self, stop_id: &str) -> Result<(String, Option<f64>, Option<f64>)> {
         let value = self
             .get(
                 &format!("{CTB}/stop/{stop_id}"),
                 Duration::from_secs(86_400),
             )
             .await?;
-        Ok(text(&value["data"], "name_en"))
+        let data = &value["data"];
+        Ok((
+            text(data, "name_en"),
+            number(data, "lat"),
+            number(data, "long"),
+        ))
     }
 
     async fn ctb_find_stop(
@@ -976,7 +1318,7 @@ impl Client {
             .await?;
         for row in value["data"].as_array().into_iter().flatten() {
             let id = text(row, "stop");
-            let name = self.ctb_stop_name(&id).await?;
+            let (name, _, _) = self.ctb_stop(&id).await?;
             if id == query || name.to_lowercase().contains(&query.to_lowercase()) {
                 return Ok(Some((id, name)));
             }
@@ -1042,6 +1384,258 @@ fn text(value: &Value, key: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+fn number(value: &Value, key: &str) -> Option<f64> {
+    value.get(key).and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+    })
+}
+
+struct KmbIndex {
+    stops: HashMap<String, (String, f64, f64)>,
+    routes: HashMap<(String, String, String), Vec<(i64, String)>>,
+    by_stop: HashMap<String, Vec<(String, String, String, i64)>>,
+}
+
+fn stop_matches(name: &str, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    !query.is_empty() && name.to_lowercase().contains(&query)
+}
+
+fn matching_stops(index: &KmbIndex, query: &str) -> Vec<(String, String, f64, f64)> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<(String, String, f64, f64)> = Vec::new();
+    if let Some((name, lat, lng)) = index
+        .stops
+        .get(query)
+        .or_else(|| index.stops.get(&query.to_uppercase()))
+    {
+        out.push((query.to_uppercase(), name.clone(), *lat, *lng));
+    }
+    for (id, (name, lat, lng)) in &index.stops {
+        if out.iter().any(|(existing, _, _, _)| existing == id) {
+            continue;
+        }
+        if name.to_lowercase().contains(&needle) {
+            out.push((id.clone(), name.clone(), *lat, *lng));
+        }
+    }
+    out.sort_by_key(|(_, name, _, _)| {
+        let lower = name.to_lowercase();
+        (lower != needle, !lower.starts_with(&needle), lower.len())
+    });
+    // A broad place name such as "Central" otherwise matches buildings like
+    // "PARK CENTRAL"; keep the strongest matches only.
+    out.truncate(12);
+    out
+}
+
+fn direct_journeys(
+    index: &KmbIndex,
+    from_stops: &[(String, String, f64, f64)],
+    to_stops: &[(String, String, f64, f64)],
+    from: &str,
+    to: &str,
+) -> Vec<Journey> {
+    let to_names: HashMap<&str, &str> = to_stops
+        .iter()
+        .map(|(id, name, _, _)| (id.as_str(), name.as_str()))
+        .collect();
+    let mut best: HashMap<(String, String, String, String, String), Journey> = HashMap::new();
+    for (from_id, from_name, _, _) in from_stops {
+        let Some(entries) = index.by_stop.get(from_id) else {
+            continue;
+        };
+        for (route, bound, service_type, from_sequence) in entries {
+            let key = (route.clone(), bound.clone(), service_type.clone());
+            let Some(stops) = index.routes.get(&key) else {
+                continue;
+            };
+            let Some((to_sequence, to_id)) = stops
+                .iter()
+                .filter(|(sequence, id)| {
+                    sequence > from_sequence && to_names.contains_key(id.as_str())
+                })
+                .min_by_key(|(sequence, _)| *sequence)
+            else {
+                continue;
+            };
+            let Some(to_name) = to_names.get(to_id.as_str()) else {
+                continue;
+            };
+            let total = to_sequence - from_sequence;
+            let journey = Journey {
+                from: from.to_string(),
+                to: to.to_string(),
+                kind: "direct".into(),
+                transfers: 0,
+                total_stops: total,
+                legs: vec![JourneyLeg {
+                    operator: "kmb".into(),
+                    route: route.clone(),
+                    direction: direction_label(bound),
+                    service_type: service_type.clone(),
+                    board: from_name.clone(),
+                    board_id: from_id.clone(),
+                    alight: (*to_name).to_string(),
+                    alight_id: to_id.clone(),
+                    stops: total,
+                }],
+            };
+            best.entry((
+                route.clone(),
+                bound.clone(),
+                service_type.clone(),
+                from_id.clone(),
+                to_id.clone(),
+            ))
+            .or_insert(journey);
+        }
+    }
+    best.into_values().collect()
+}
+
+fn transfer_journeys(
+    index: &KmbIndex,
+    from_stops: &[(String, String, f64, f64)],
+    to_stops: &[(String, String, f64, f64)],
+    from: &str,
+    to: &str,
+    limit: usize,
+) -> Vec<Journey> {
+    let to_ids: HashSet<&str> = to_stops.iter().map(|(id, _, _, _)| id.as_str()).collect();
+    let mut seen: HashSet<(String, String, String, String, String, String)> = HashSet::new();
+    let mut out = Vec::new();
+    let mut examined = 0usize;
+
+    'outer: for (from_id, from_name, _, _) in from_stops.iter().take(10) {
+        let Some(entries) = index.by_stop.get(from_id) else {
+            continue;
+        };
+        for (route_a, bound_a, service_type_a, from_sequence) in entries {
+            let Some(stops_a) =
+                index
+                    .routes
+                    .get(&(route_a.clone(), bound_a.clone(), service_type_a.clone()))
+            else {
+                continue;
+            };
+            for (interchange_sequence, interchange_id) in stops_a
+                .iter()
+                .filter(|(sequence, _)| sequence > from_sequence)
+            {
+                if to_ids.contains(interchange_id.as_str()) {
+                    continue;
+                }
+                let Some(interchange_entries) = index.by_stop.get(interchange_id) else {
+                    continue;
+                };
+                let Some((interchange_name, _, _)) = index.stops.get(interchange_id) else {
+                    continue;
+                };
+                for (route_b, bound_b, service_type_b, interchange_sequence_b) in
+                    interchange_entries
+                {
+                    if route_b == route_a {
+                        continue;
+                    }
+                    examined += 1;
+                    if examined > 100_000 {
+                        break 'outer;
+                    }
+                    let Some(stops_b) = index.routes.get(&(
+                        route_b.clone(),
+                        bound_b.clone(),
+                        service_type_b.clone(),
+                    )) else {
+                        continue;
+                    };
+                    let Some((to_sequence, to_id)) = stops_b
+                        .iter()
+                        .filter(|(sequence, id)| {
+                            sequence > interchange_sequence_b && to_ids.contains(id.as_str())
+                        })
+                        .min_by_key(|(sequence, _)| *sequence)
+                    else {
+                        continue;
+                    };
+                    let key = (
+                        route_a.clone(),
+                        bound_a.clone(),
+                        from_id.clone(),
+                        route_b.clone(),
+                        bound_b.clone(),
+                        to_id.clone(),
+                    );
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    let Some((to_name, _, _)) = index.stops.get(to_id) else {
+                        continue;
+                    };
+                    let first_leg = interchange_sequence - from_sequence;
+                    let second_leg = to_sequence - interchange_sequence_b;
+                    out.push(Journey {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                        kind: "one-transfer".into(),
+                        transfers: 1,
+                        total_stops: first_leg + second_leg,
+                        legs: vec![
+                            JourneyLeg {
+                                operator: "kmb".into(),
+                                route: route_a.clone(),
+                                direction: direction_label(bound_a),
+                                service_type: service_type_a.clone(),
+                                board: from_name.clone(),
+                                board_id: from_id.clone(),
+                                alight: interchange_name.clone(),
+                                alight_id: interchange_id.clone(),
+                                stops: first_leg,
+                            },
+                            JourneyLeg {
+                                operator: "kmb".into(),
+                                route: route_b.clone(),
+                                direction: direction_label(bound_b),
+                                service_type: service_type_b.clone(),
+                                board: interchange_name.clone(),
+                                board_id: interchange_id.clone(),
+                                alight: to_name.clone(),
+                                alight_id: to_id.clone(),
+                                stops: second_leg,
+                            },
+                        ],
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by_key(|journey| journey.total_stops);
+    out.truncate(limit);
+    out
+}
+
+fn direction_label(value: &str) -> String {
+    match value.to_lowercase().as_str() {
+        "o" | "outbound" | "1" => "outbound".into(),
+        "i" | "inbound" | "2" => "inbound".into(),
+        other => other.to_string(),
+    }
+}
+
+fn haversine_km(lat1: f64, lng1: f64, lat2: f64, lng2: f64) -> f64 {
+    const EARTH_RADIUS_KM: f64 = 6371.0;
+    let delta_lat = (lat2 - lat1).to_radians();
+    let delta_lng = (lng2 - lng1).to_radians();
+    let a = (delta_lat / 2.0).sin().powi(2)
+        + lat1.to_radians().cos() * lat2.to_radians().cos() * (delta_lng / 2.0).sin().powi(2);
+    2.0 * EARTH_RADIUS_KM * a.sqrt().asin()
 }
 
 fn kmb_word(bound: impl AsRef<str>) -> &'static str {
@@ -1523,5 +2117,85 @@ mod tests {
         let stamp = now.to_rfc3339();
         let minutes = minutes_until(&stamp).unwrap();
         assert!((4..=5).contains(&minutes));
+    }
+
+    #[test]
+    fn measures_distance_between_two_hong_kong_points() {
+        let km = haversine_km(22.2819, 114.1582, 22.2976, 114.1722);
+        assert!((1.5..3.5).contains(&km), "unexpected distance {km}");
+    }
+
+    fn synthetic_index() -> KmbIndex {
+        let mut stops = HashMap::new();
+        stops.insert("A".to_string(), ("Alpha Estate".to_string(), 22.30, 114.16));
+        stops.insert("B".to_string(), ("Bravo Road".to_string(), 22.31, 114.17));
+        stops.insert("C".to_string(), ("Charlie Bay".to_string(), 22.32, 114.18));
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("1".to_string(), "O".to_string(), "1".to_string()),
+            vec![(1, "A".to_string()), (2, "B".to_string())],
+        );
+        routes.insert(
+            ("2".to_string(), "I".to_string(), "1".to_string()),
+            vec![(1, "B".to_string()), (2, "C".to_string())],
+        );
+
+        let mut by_stop = HashMap::new();
+        by_stop.insert(
+            "A".to_string(),
+            vec![("1".to_string(), "O".to_string(), "1".to_string(), 1)],
+        );
+        by_stop.insert(
+            "B".to_string(),
+            vec![
+                ("1".to_string(), "O".to_string(), "1".to_string(), 2),
+                ("2".to_string(), "I".to_string(), "1".to_string(), 1),
+            ],
+        );
+        by_stop.insert(
+            "C".to_string(),
+            vec![("2".to_string(), "I".to_string(), "1".to_string(), 2)],
+        );
+
+        KmbIndex {
+            stops,
+            routes,
+            by_stop,
+        }
+    }
+
+    #[test]
+    fn finds_a_direct_kmb_journey() {
+        let index = synthetic_index();
+        let from = matching_stops(&index, "Alpha");
+        let to = matching_stops(&index, "Bravo");
+        let journeys = direct_journeys(&index, &from, &to, "Alpha", "Bravo");
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0].kind, "direct");
+        assert_eq!(journeys[0].total_stops, 1);
+        assert_eq!(journeys[0].legs[0].route, "1");
+        assert_eq!(journeys[0].legs[0].alight, "Bravo Road");
+    }
+
+    #[test]
+    fn finds_a_one_transfer_kmb_journey() {
+        let index = synthetic_index();
+        let from = matching_stops(&index, "Alpha");
+        let to = matching_stops(&index, "Charlie");
+        assert!(direct_journeys(&index, &from, &to, "Alpha", "Charlie").is_empty());
+        let journeys = transfer_journeys(&index, &from, &to, "Alpha", "Charlie", 5);
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0].transfers, 1);
+        assert_eq!(journeys[0].total_stops, 2);
+        assert_eq!(journeys[0].legs.len(), 2);
+        assert_eq!(journeys[0].legs[1].alight, "Charlie Bay");
+    }
+
+    #[test]
+    fn prefers_stop_names_that_start_with_the_query() {
+        let index = synthetic_index();
+        let matches = matching_stops(&index, "Charlie");
+        assert_eq!(matches[0].1, "Charlie Bay");
     }
 }

@@ -1,6 +1,6 @@
 //! Human-readable bus tables.
 
-use crate::api::{self, Eta, RedRoute, RedRouteDetail, RouteInfo, Stop};
+use crate::api::{self, Eta, Journey, NearbyStop, RedRoute, RedRouteDetail, RouteInfo, Stop};
 
 pub fn routes(operator: &str, routes: &[RouteInfo]) -> String {
     let mut out = format!("{operator} routes\n\n");
@@ -72,6 +72,60 @@ pub fn etas(route: &str, stop: &str, etas: &[Eta]) -> String {
         ));
     }
     out.push_str("\nLive predictions. Traffic can change them without notice.\n");
+    out
+}
+
+pub fn nearby(lat: f64, lng: f64, stops: &[NearbyStop]) -> String {
+    let mut out = format!("Stops near {lat:.4}, {lng:.4}\n\n");
+    out.push_str(&format!(
+        "{:<10} {:<8} {:<16} {}\n",
+        "Distance", "Operator", "Stop id", "Name"
+    ));
+    out.push_str(&"-".repeat(78));
+    out.push('\n');
+    for stop in stops {
+        out.push_str(&format!(
+            "{:<10} {:<8} {:<16} {}\n",
+            format!("{:.2} km", stop.distance_km),
+            stop.operator,
+            truncate(&stop.id, 15),
+            stop.name
+        ));
+    }
+    out.push_str("\nUse the stop id with `eta <operator> <route> <stop-id>` for live arrivals.\n");
+    out
+}
+
+pub fn journeys(from: &str, to: &str, journeys: &[Journey]) -> String {
+    let mut out = format!("Journeys from {from} to {to}\n\n");
+    for (index, journey) in journeys.iter().enumerate() {
+        out.push_str(&format!(
+            "{}. {} option, {} stops\n",
+            index + 1,
+            if journey.transfers == 0 {
+                "direct"
+            } else {
+                "one-transfer"
+            },
+            journey.total_stops
+        ));
+        for leg in &journey.legs {
+            out.push_str(&format!(
+                "   {:<10} {:<6} {:<9} {} → {}",
+                leg.operator,
+                leg.route,
+                leg.direction,
+                truncate(&leg.board, 30),
+                truncate(&leg.alight, 30)
+            ));
+            if leg.service_type != "1" && !leg.service_type.is_empty() {
+                out.push_str(&format!("  (service type {})", leg.service_type));
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str("Best-effort planning from published route-stop data, not a live journey time.\n");
     out
 }
 

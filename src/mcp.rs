@@ -105,6 +105,18 @@ fn tools() -> Value {
             }
         },
         {
+            "name": "private_bus_eta",
+            "description": "Live Park Island (PITCL) next-arrival predictions for NR330, NR332, NR334 and NR338, from the operator's public ETA backend. Discovery Bay has no public live feed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "route": {"type": "string", "enum": ["NR330", "NR332", "NR334", "NR338"]},
+                    "direction": {"type": "number", "enum": [1, 2], "description": "1 outbound, 2 inbound; omit for both."}
+                },
+                "required": ["route"]
+            }
+        },
+        {
             "name": "private_bus_routes",
             "description": "Reference routes for private estate coaches without a live feed: Discovery Bay (DBTSL) and Park Island (PITCL).",
             "inputSchema": {
@@ -182,6 +194,16 @@ async fn call(client: &Client, request: &Value) -> Result<String> {
             Ok(render::etas(&route, &stop, &etas))
         }
         "private_bus_routes" => Ok(render::private(arg("query").as_deref())),
+        "private_bus_eta" => {
+            let route = arg("route").ok_or_else(|| anyhow::anyhow!("route is required"))?;
+            let direction = args
+                .get("direction")
+                .and_then(Value::as_u64)
+                .map(|value| value as u8);
+            let mut etas = client.pitcl_eta(&route, direction).await?;
+            etas.sort_by_key(|eta| (eta.minutes.unwrap_or(i64::MAX), eta.eta.clone()));
+            Ok(render::etas(&route, "Park Island stops", &etas))
+        }
         "red_minibus_routes" => {
             let routes = client.red_routes().await?;
             let needle = arg("query").map(|value| value.to_lowercase());

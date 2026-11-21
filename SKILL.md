@@ -14,7 +14,8 @@ Use it when the user asks about:
 
 - the next KMB, Citybus, green minibus, NLB or MTR Bus at a stop
 - which stops a route serves and in what order
-- which route goes from A to B in Hong Kong
+- which route goes from A to B in Hong Kong (KMB, Citybus and NLB; green
+  minibus route discovery is not covered yet)
 - a Discovery Bay or Park Island coach
 - which red minibus goes from Kennedy Town to Shau Kei Wan, or what it costs
 
@@ -79,6 +80,10 @@ $BIN eta gmb N40 "Stanley Beach"
 $BIN eta nlb 1 "Mui Wo"
 $BIN eta mtrbus K51 K51-U210
 
+$BIN near 22.3193 114.1694 --radius 0.5 --limit 10
+$BIN near 22.2883 114.1504 --operator ctb --route 1 --radius 0.3
+$BIN journey "Chuk Yuen" "Central" --limit 3
+
 $BIN private
 $BIN private --query "Discovery Bay"
 $BIN private-eta NR330
@@ -118,6 +123,26 @@ The renderer shows `no ETA` when the operator has a stop but no prediction.
 
 MTR Bus publishes stop ids but not stop names. `stops mtrbus` therefore shows
 the id in both columns, and `eta mtrbus` matches on the id.
+
+### Nearby stops and journeys
+
+`near` finds stops around a WGS84 coordinate and prints the distance. KMB
+needs no route because it publishes a bulk stop list with coordinates;
+Citybus and NLB publish coordinates inside a route stop list, so pass
+`--route` for those. GMB and MTR Bus publish no stop coordinates, and `near`
+says so instead of returning an empty result.
+
+`journey` plans a **direct** route first and falls back to **one transfer**
+when there is no direct option. It searches the published KMB route-stop
+graph and asks Citybus and NLB only when KMB has no answer, because their stop
+details are one request per stop. Green minibus route discovery is not covered
+yet: GMB has no bulk route-stop endpoint, and a place-name search would need
+hundreds of requests.
+
+Journeys are route options, not live journey times. The planner does not know
+about service hours, walking interchanges or frequency, and a "stops" count is
+the number of published stops between boarding and alighting. Check the live
+ETA before setting out.
 
 ### Private coaches and red minibuses
 
@@ -176,6 +201,9 @@ Tools:
 | `private_bus_eta` | `{ "route": "NR330"\|"NR332"\|"NR334"\|"NR338", "direction"?: 1\|2 }` |
 | `red_minibus_routes` | `{ "query"?: string, "district"?: string }` |
 | `red_minibus_route` | `{ "route": string }` |
+| `red_minibus_info` | `{}` |
+| `bus_stops_near` | `{ "lat": number, "lng": number, "operator"?: string, "route"?: string, "radius_km"?: number, "limit"?: number }` |
+| `bus_journey` | `{ "from": string, "to": string, "limit"?: number }` |
 
 The server speaks JSON-RPC 2.0 over stdio, one message per line, and implements
 `initialize`, `ping`, `tools/list` and `tools/call`.

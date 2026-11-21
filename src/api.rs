@@ -808,16 +808,13 @@ impl Client {
         let index = self.kmb_index().await?;
         let from_stops = matching_stops(&index, from);
         let to_stops = matching_stops(&index, to);
-        if from_stops.is_empty() {
-            bail!("no KMB stop matches {from:?}");
-        }
-        if to_stops.is_empty() {
-            bail!("no KMB stop matches {to:?}");
-        }
 
-        let mut out = direct_journeys(&index, &from_stops, &to_stops, from, to);
-        if out.is_empty() {
-            out = transfer_journeys(&index, &from_stops, &to_stops, from, to, limit);
+        let mut out = Vec::new();
+        if !from_stops.is_empty() && !to_stops.is_empty() {
+            out = direct_journeys(&index, &from_stops, &to_stops, from, to);
+            if out.is_empty() {
+                out = transfer_journeys(&index, &from_stops, &to_stops, from, to, limit);
+            }
         }
         // Citybus stop details are a per-stop request, so only ask the other
         // operators when KMB found nothing. This keeps the common case fast.

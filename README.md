@@ -58,6 +58,9 @@ hkbus eta ctb 1 "Central"
 hkbus eta gmb N40 "Stanley Beach"
 hkbus eta nlb 1 "Mui Wo"
 hkbus eta mtrbus K51 K51-U210
+hkbus near 22.3193 114.1694 --radius 0.5 --limit 10
+hkbus near 22.2883 114.1504 --operator ctb --route 1 --radius 0.3
+hkbus journey "Chuk Yuen" "Central" --limit 3
 hkbus private --query "Discovery Bay"
 hkbus private-eta NR330
 hkbus red-minibus --query "Kennedy Town"
@@ -76,6 +79,13 @@ hkbus update --check
   ambiguity.
 - An empty ETA list is normal at night or at a route's terminus. The CLI says
   `no ETA` when a stop exists but has no prediction.
+- `near` uses the KMB bulk stop list, which carries coordinates. Citybus and
+  NLB need `--route` because their coordinates only appear in route stop
+  lists. GMB and MTR Bus publish no stop coordinates.
+- `journey` returns direct routes first and a one-transfer option only when
+  there is no direct route. It covers KMB, Citybus and NLB; GMB route
+discovery is not implemented because the feed has no bulk route-stop endpoint.
+  A journey is a route option, not a live journey time.
 - MTR Bus publishes stop ids only. The feed does not include stop names.
 - Discovery Bay and Park Island routes and fares are reference data. Park
   Island NR330/332/334/338 have live ETA via `private-eta`; Discovery Bay has
@@ -112,7 +122,8 @@ not inherit the shell `PATH`.
 
 
 Tools: `bus_routes`, `bus_stops`, `bus_eta`, `private_bus_routes`,
-`private_bus_eta`, `red_minibus_routes`, `red_minibus_route`. See
+`private_bus_eta`, `red_minibus_routes`, `red_minibus_route`,
+`red_minibus_info`, `bus_stops_near`, `bus_journey`. See
 [`SKILL.md`](SKILL.md) for schemas.
 
 ## Run modes and deployment

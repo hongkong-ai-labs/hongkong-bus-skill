@@ -161,6 +161,40 @@ fn tools() -> Value {
                 },
                 "required": ["route"]
             }
+        },
+        {
+            "name": "red_minibus_info",
+            "description": "Reference notes and operating caveats for red minibuses.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "bus_stops_near",
+            "description": "Stops within a radius of a WGS84 coordinate. KMB works without a route because it publishes a bulk stop list; Citybus and NLB need a route. GMB and MTR Bus do not publish stop coordinates.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "lat": {"type": "number", "description": "Latitude, e.g. 22.3193."},
+                    "lng": {"type": "number", "description": "Longitude, e.g. 114.1694."},
+                    "operator": {"type": "string", "enum": ["kmb", "ctb", "gmb", "nlb", "mtrbus"], "description": "Default kmb."},
+                    "route": {"type": "string", "description": "Route number; required for ctb and nlb."},
+                    "radius_km": {"type": "number", "minimum": 0.01, "maximum": 20, "description": "Search radius in kilometres. Default 0.5."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Default 20."}
+                },
+                "required": ["lat", "lng"]
+            }
+        },
+        {
+            "name": "bus_journey",
+            "description": "Plan a direct or one-transfer bus journey between two stop or place names. Searches KMB, Citybus and NLB published route-stop data; green minibus route discovery is not covered yet.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string", "description": "Origin stop or place name, or a KMB stop id."},
+                    "to": {"type": "string", "description": "Destination stop or place name, or a KMB stop id."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Default 5."}
+                },
+                "required": ["from", "to"]
+            }
         }
     ])
 }
@@ -245,6 +279,43 @@ async fn call(client: &Client, request: &Value) -> Result<String> {
             Ok(render::red_route(&client.red_route(&route).await?))
         }
         "red_minibus_info" => Ok(RED_MINIBUS.to_string()),
+        "bus_stops_near" => {
+            let lat = args
+                .get("lat")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| anyhow::anyhow!("lat is required"))?;
+            let lng = args
+                .get("lng")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| anyhow::anyhow!("lng is required"))?;
+            let operator = Operator::parse(arg("operator").as_deref().unwrap_or("kmb"))?;
+            let radius = args.get("radius_km").and_then(Value::as_f64).unwrap_or(0.5);
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .max(1) as usize;
+            let stops = client
+                .stops_near(operator, lat, lng, radius, limit, arg("route").as_deref())
+                .await?;
+            Ok(serde_json::to_string_pretty(&stops)?)
+        }
+        "bus_journey" => {
+            let from = arg("from").ok_or_else(|| anyhow::anyhow!("from is required"))?;
+            let to = arg("to").ok_or_else(|| anyhow::anyhow!("to is required"))?;
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(5)
+                .max(1) as usize;
+            let journeys = client.journey(&from, &to, limit).await?;
+            Ok(serde_json::to_string_pretty(&json!({
+                "from": from,
+                "to": to,
+                "count": journeys.len(),
+                "journeys": journeys
+            }))?)
+        }
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }

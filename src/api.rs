@@ -819,7 +819,11 @@ impl Client {
         if out.is_empty() {
             out = transfer_journeys(&index, &from_stops, &to_stops, from, to, limit);
         }
-        out.extend(self.candidate_direct(from, to).await?);
+        // Citybus stop details are a per-stop request, so only ask the other
+        // operators when KMB found nothing. This keeps the common case fast.
+        if out.is_empty() {
+            out.extend(self.candidate_direct(from, to).await?);
+        }
 
         out.sort_by(|left, right| {
             left.transfers
@@ -945,7 +949,7 @@ impl Client {
                 && left.direction == right.direction
                 && left.service_type == right.service_type
         });
-        candidates.truncate(40);
+        candidates.truncate(8);
 
         let mut out = Vec::new();
         for (operator, info) in candidates {
@@ -1429,7 +1433,9 @@ fn matching_stops(index: &KmbIndex, query: &str) -> Vec<(String, String, f64, f6
         let lower = name.to_lowercase();
         (lower != needle, !lower.starts_with(&needle), lower.len())
     });
-    out.truncate(40);
+    // A broad place name such as "Central" otherwise matches buildings like
+    // "PARK CENTRAL"; keep the strongest matches only.
+    out.truncate(12);
     out
 }
 
@@ -2114,5 +2120,85 @@ mod tests {
         let stamp = now.to_rfc3339();
         let minutes = minutes_until(&stamp).unwrap();
         assert!((4..=5).contains(&minutes));
+    }
+
+    #[test]
+    fn measures_distance_between_two_hong_kong_points() {
+        let km = haversine_km(22.2819, 114.1582, 22.2976, 114.1722);
+        assert!((1.5..3.5).contains(&km), "unexpected distance {km}");
+    }
+
+    fn synthetic_index() -> KmbIndex {
+        let mut stops = HashMap::new();
+        stops.insert("A".to_string(), ("Alpha Estate".to_string(), 22.30, 114.16));
+        stops.insert("B".to_string(), ("Bravo Road".to_string(), 22.31, 114.17));
+        stops.insert("C".to_string(), ("Charlie Bay".to_string(), 22.32, 114.18));
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("1".to_string(), "O".to_string(), "1".to_string()),
+            vec![(1, "A".to_string()), (2, "B".to_string())],
+        );
+        routes.insert(
+            ("2".to_string(), "I".to_string(), "1".to_string()),
+            vec![(1, "B".to_string()), (2, "C".to_string())],
+        );
+
+        let mut by_stop = HashMap::new();
+        by_stop.insert(
+            "A".to_string(),
+            vec![("1".to_string(), "O".to_string(), "1".to_string(), 1)],
+        );
+        by_stop.insert(
+            "B".to_string(),
+            vec![
+                ("1".to_string(), "O".to_string(), "1".to_string(), 2),
+                ("2".to_string(), "I".to_string(), "1".to_string(), 1),
+            ],
+        );
+        by_stop.insert(
+            "C".to_string(),
+            vec![("2".to_string(), "I".to_string(), "1".to_string(), 2)],
+        );
+
+        KmbIndex {
+            stops,
+            routes,
+            by_stop,
+        }
+    }
+
+    #[test]
+    fn finds_a_direct_kmb_journey() {
+        let index = synthetic_index();
+        let from = matching_stops(&index, "Alpha");
+        let to = matching_stops(&index, "Bravo");
+        let journeys = direct_journeys(&index, &from, &to, "Alpha", "Bravo");
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0].kind, "direct");
+        assert_eq!(journeys[0].total_stops, 1);
+        assert_eq!(journeys[0].legs[0].route, "1");
+        assert_eq!(journeys[0].legs[0].alight, "Bravo Road");
+    }
+
+    #[test]
+    fn finds_a_one_transfer_kmb_journey() {
+        let index = synthetic_index();
+        let from = matching_stops(&index, "Alpha");
+        let to = matching_stops(&index, "Charlie");
+        assert!(direct_journeys(&index, &from, &to, "Alpha", "Charlie").is_empty());
+        let journeys = transfer_journeys(&index, &from, &to, "Alpha", "Charlie", 5);
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0].transfers, 1);
+        assert_eq!(journeys[0].total_stops, 2);
+        assert_eq!(journeys[0].legs.len(), 2);
+        assert_eq!(journeys[0].legs[1].alight, "Charlie Bay");
+    }
+
+    #[test]
+    fn prefers_stop_names_that_start_with_the_query() {
+        let index = synthetic_index();
+        let matches = matching_stops(&index, "Charlie");
+        assert_eq!(matches[0].1, "Charlie Bay");
     }
 }

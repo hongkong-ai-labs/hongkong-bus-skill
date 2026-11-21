@@ -214,9 +214,12 @@ async fn call(client: &Client, request: &Value) -> Result<String> {
                     needle.as_ref().is_none_or(|needle| {
                         route.name.to_lowercase().contains(needle)
                             || route.description.to_lowercase().contains(needle)
-                    }) && area
-                        .as_ref()
-                        .is_none_or(|area| route.district.to_lowercase().contains(area))
+                    }) && area.as_ref().is_none_or(|area| {
+                        route
+                            .districts
+                            .iter()
+                            .any(|district| district.to_lowercase().contains(area))
+                    })
                 })
                 .collect();
             Ok(render::red_routes(&filtered))

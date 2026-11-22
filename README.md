@@ -82,10 +82,12 @@ hkbus update --check
 - `near` uses the KMB bulk stop list, which carries coordinates. Citybus and
   NLB need `--route` because their coordinates only appear in route stop
   lists. GMB and MTR Bus publish no stop coordinates.
-- `journey` returns direct routes first and a one-transfer option only when
-  there is no direct route. It covers KMB, Citybus and NLB; GMB route
-discovery is not implemented because the feed has no bulk route-stop endpoint.
-  A journey is a route option, not a live journey time.
+- `journey` queries KMB, Citybus and NLB together and ranks the merged
+  results; no operator is used only as a fallback. KMB supplies direct and
+  one-transfer options from its bulk route-stop graph; Citybus and NLB supply
+  direct options. GMB route discovery is not implemented because the feed has
+  no bulk route-stop endpoint. A journey is a route option, not a live journey
+  time.
 - MTR Bus publishes stop ids only. The feed does not include stop names.
 - Discovery Bay and Park Island routes and fares are reference data. Park
   Island NR330/332/334/338 have live ETA via `private-eta`; Discovery Bay has

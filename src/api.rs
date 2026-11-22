@@ -792,8 +792,11 @@ impl Client {
     }
 
     /// Best-effort direct and one-transfer journeys across KMB, Citybus and
-    /// NLB. Green minibus route discovery is not covered yet because its feed
-    /// has no bulk route-stop endpoint.
+    /// NLB. KMB publishes a bulk route-stop graph, so it supplies both direct
+    /// and one-transfer options. Citybus and NLB are queried for direct
+    /// options on every request and their results are merged with KMB's; no
+    /// operator is treated as a fallback. Green minibus route discovery is not
+    /// covered yet because its feed has no bulk route-stop endpoint.
     pub async fn journey(&self, from: &str, to: &str, limit: usize) -> Result<Vec<Journey>> {
         let from = from.trim();
         let to = to.trim();
@@ -816,11 +819,9 @@ impl Client {
                 out = transfer_journeys(&index, &from_stops, &to_stops, from, to, limit);
             }
         }
-        // Citybus stop details are a per-stop request, so only ask the other
-        // operators when KMB found nothing. This keeps the common case fast.
-        if out.is_empty() {
-            out.extend(self.candidate_direct(from, to).await?);
-        }
+        // Hong Kong routes are split across operators, so always ask Citybus
+        // and NLB as well instead of treating them as a fallback for KMB.
+        out.extend(self.candidate_direct(from, to).await?);
 
         out.sort_by(|left, right| {
             left.transfers
@@ -836,7 +837,7 @@ impl Client {
         out.truncate(limit);
         if out.is_empty() {
             bail!(
-                "no direct KMB, Citybus or NLB route connects {from:?} and {to:?}; try a nearby stop name or a route number"
+                "no KMB, Citybus or NLB route connects {from:?} and {to:?}; try a nearby stop name or a route number"
             );
         }
         Ok(out)

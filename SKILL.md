@@ -132,12 +132,12 @@ Citybus and NLB publish coordinates inside a route stop list, so pass
 `--route` for those. GMB and MTR Bus publish no stop coordinates, and `near`
 says so instead of returning an empty result.
 
-`journey` plans a **direct** route first and falls back to **one transfer**
-when there is no direct option. It searches the published KMB route-stop
-graph and asks Citybus and NLB only when KMB has no answer, because their stop
-details are one request per stop. Green minibus route discovery is not covered
-yet: GMB has no bulk route-stop endpoint, and a place-name search would need
-hundreds of requests.
+`journey` queries KMB, Citybus and NLB together and ranks the merged results;
+no operator is treated as a fallback. KMB publishes a bulk route-stop graph,
+so it supplies direct and one-transfer options; Citybus and NLB are searched
+for direct options on candidate routes. Green minibus route discovery is not
+covered yet: GMB has no bulk route-stop endpoint, and a place-name search would
+need hundreds of requests.
 
 Journeys are route options, not live journey times. The planner does not know
 about service hours, walking interchanges or frequency, and a "stops" count is
